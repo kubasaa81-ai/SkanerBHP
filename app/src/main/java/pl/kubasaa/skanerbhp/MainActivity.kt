@@ -555,7 +555,7 @@ class MainActivity : AppCompatActivity() {
         }
         if (wpis == null || nr < 0) {
             cofanie.addLast(-1)
-            tWynik.text = "\u2716 Tego nie ma na liście - sprawdź na komputerze"
+            tWynik.text = "\u2716 Nie z listy (inny rozmiar?) - sprawdź na komputerze"
             tWynik.setTextColor(czerwony)
             ton?.startTone(ToneGenerator.TONE_SUP_ERROR, 400)
             return
