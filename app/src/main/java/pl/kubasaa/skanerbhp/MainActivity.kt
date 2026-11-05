@@ -98,6 +98,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private class Skan(val nr: Int, val kod: String)
     private val skany = mutableListOf<Skan>()
     private var nastepnyNr = 1
+    private var sesja = System.currentTimeMillis() % 1000000      // zmienia się przy nowej liście / starcie
 
     // ten sam kod nie wysyła się drugi raz, dopóki nie zniknie z kadru
     private var kodWKadrze: String? = null
@@ -398,6 +399,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         synchronized(skany) {
             skany.clear()
             nastepnyNr = 1
+            sesja = System.currentTimeMillis() % 1000000
         }
         runOnUiThread {
             if (!naWydaniu) pokazWydanie()
@@ -407,7 +409,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
 
     override fun skany(od: Int): String {
         synchronized(skany) {
-            return skany.filter { it.nr >= od }.joinToString("\n") { "${it.nr}|${it.kod}" }
+            val linie = skany.filter { it.nr >= od }.joinToString("") { "\n${it.nr}|${it.kod}" }
+            return "SESJA|$sesja$linie"
         }
     }
 
