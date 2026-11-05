@@ -12,6 +12,10 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
 
+    <queries>
+        <package android:name="com.paloaltonetworks.globalprotect" />
+    </queries>
+
     <application
         android:allowBackup="false"
         android:icon="@drawable/ic_skaner"

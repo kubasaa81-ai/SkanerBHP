@@ -1,9 +1,6 @@
 package pl.kubasaa.skanerbhp
 
 import android.Manifest
-import android.annotation.SuppressLint
-import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothDevice
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -11,8 +8,12 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioManager
 import android.media.ToneGenerator
-import android.os.Build
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
 import android.util.TypedValue
@@ -20,15 +21,13 @@ import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.WindowManager
-import android.widget.AdapterView
-import android.widget.ArrayAdapter
 import android.widget.Button
-import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.Spinner
 import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.addCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.Camera
@@ -47,44 +46,58 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import java.net.Inet4Address
 import java.net.NetworkInterface
-import java.net.ServerSocket
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import kotlin.system.exitProcess
 
 /**
- * Skaner BHP - aparat czyta kod kreskowy, telefon wpisuje go w komputerze jak klawiatura Bluetooth (+ Enter).
- * Kod trafia do okna, które ma kursor: w Programie BHP pole "Skan kodu" (Wydanie / Magazyn).
- * Lista "co wydać": kod QR z okna Wydanie (przycisk "Lista na telefon") - aparat sam ją wczytuje,
- * a każdy skan odhacza pozycję i od razu ostrzega (inny rozmiar, nie z listy, ponad listę).
+ * Skaner BHP - telefon jako skaner dla Programu BHP (Excel) przez sieć firmową (GlobalProtect).
+ * Ekran startowy: Wydanie / Dostawa / Inwentura / Zakończ.
+ * Wydanie: komputer wysyła listę "co wydać", aparat czyta kody, komputer pobiera skany i odsyła wynik.
  */
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), Serwer.Obsluga {
 
     private val zielony = Color.rgb(46, 125, 50)
     private val czerwony = Color.rgb(198, 40, 40)
     private val pomaranczowy = Color.rgb(230, 81, 0)
     private val szary = Color.rgb(96, 125, 139)
+    private val niebieski = Color.rgb(21, 101, 192)
 
-    private lateinit var tStatus: TextView
-    private lateinit var spKomputer: Spinner
+    private lateinit var ekranStart: LinearLayout
+    private lateinit var ekranWydanie: LinearLayout
+    private var naWydaniu = false
+
+    // start
+    private lateinit var tSiec: TextView
+    private lateinit var tKomputerStart: TextView
+    private lateinit var bVpn: Button
+
+    // wydanie
+    private lateinit var tKomputer: TextView
     private lateinit var podglad: PreviewView
     private lateinit var tKod: TextView
-    private lateinit var tHistoria: TextView
     private lateinit var tWynik: TextView
     private lateinit var listaWidok: LinearLayout
-    private lateinit var listaPrzewijanie: ScrollView
     private lateinit var eReczny: EditText
-    private lateinit var cbEnter: CheckBox
     private lateinit var bLatarka: Button
 
-    private var klawiatura: HidKlawiatura? = null
-    private var urzadzenia: List<BluetoothDevice> = emptyList()
-    private val historia = ArrayDeque<String>()
+    private val serwer = Serwer(this)
+    private val handler = Handler(Looper.getMainLooper())
     private var kamera: Camera? = null
+    private var dostawcaKamery: ProcessCameraProvider? = null
     private var latarka = false
     private lateinit var watekKamery: ExecutorService
     private var skaner: BarcodeScanner? = null
     private var ton: ToneGenerator? = null
-    private var wypelniaListe = false
+
+    // kontakt z komputerem
+    @Volatile private var ostatniKontakt = 0L
+    @Volatile private var adresKomputera = ""
+
+    // skany (komputer pobiera je przez /skany)
+    private class Skan(val nr: Int, val kod: String)
+    private val skany = mutableListOf<Skan>()
+    private var nastepnyNr = 1
 
     // ten sam kod nie wysyła się drugi raz, dopóki nie zniknie z kadru
     private var kodWKadrze: String? = null
@@ -92,7 +105,7 @@ class MainActivity : AppCompatActivity() {
     private var ostatnioWyslany = 0L
     private var ostatniWyslanyKod: String? = null
 
-    // lista do wydania (z kodu QR)
+    // lista do wydania
     private class Wpis(val rozmiar: String, val wariant: Int)
     private class Pozycja(
         val nazwa: String, val ilosc: Int, val rozmiar: String,
@@ -103,71 +116,64 @@ class MainActivity : AppCompatActivity() {
     }
     private val lista = mutableListOf<Pozycja>()
     private var listaTekst: String? = null
-    private val cofanie = ArrayDeque<Int>()          // numer pozycji (-1 = spoza listy) dla każdego skanu
+    private val cofanie = ArrayDeque<Int>()
 
-    private val prosba = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        uruchom()
+    private val prosbaKamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) uruchomKamere() else {
+            tKod.text = "Brak zgody na aparat"
+            tKod.setTextColor(czerwony)
+        }
+    }
+
+    private val odswiezanie = object : Runnable {
+        override fun run() {
+            pokazStan()
+            handler.postDelayed(this, 1500)
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         watekKamery = Executors.newSingleThreadExecutor()
-        zbudujWidok()
         ton = try {
             ToneGenerator(AudioManager.STREAM_NOTIFICATION, 90)
         } catch (e: Exception) {
             null
         }
-        prosba.launch(potrzebneUprawnienia())
+        zbudujStart()
+        zbudujWydanie()
+        pokazStart()
+        val blad = serwer.start(8080)
+        if (blad != null) Toast.makeText(this, "Serwer: $blad", Toast.LENGTH_LONG).show()
+        onBackPressedDispatcher.addCallback(this) {
+            if (naWydaniu) pokazStart() else moveTaskToBack(true)
+        }
     }
 
-    private fun potrzebneUprawnienia(): Array<String> {
-        val l = mutableListOf(Manifest.permission.CAMERA)
-        if (Build.VERSION.SDK_INT >= 31) {
-            l.add(Manifest.permission.BLUETOOTH_CONNECT)
-            l.add(Manifest.permission.BLUETOOTH_ADVERTISE)
-        }
-        return l.toTypedArray()
+    override fun onResume() {
+        super.onResume()
+        handler.post(odswiezanie)
     }
 
-    private fun ma(p: String) = ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
-
-    private fun maBluetooth() = Build.VERSION.SDK_INT < 31 || ma(Manifest.permission.BLUETOOTH_CONNECT)
-
-    private fun uruchom() {
-        if (ma(Manifest.permission.CAMERA)) {
-            uruchomKamere()
-        } else {
-            tKod.text = "Brak zgody na aparat"
-            tKod.setTextColor(czerwony)
-        }
-        if (!maBluetooth()) {
-            status("Brak zgody na Bluetooth (Urządzenia w pobliżu) - nadaj w ustawieniach aplikacji", czerwony)
-            return
-        }
-        if (klawiatura == null) {
-            val k = HidKlawiatura(this) { runOnUiThread { pokazStatus() } }
-            klawiatura = k
-            wczytajUrzadzenia()
-            k.start()
-        }
-        pokazStatus()
+    override fun onPause() {
+        super.onPause()
+        handler.removeCallbacks(odswiezanie)
     }
 
     // ------------------------------------------------------------------
-    //  WIDOK (budowany w kodzie)
+    //  WIDOKI
     // ------------------------------------------------------------------
     private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
 
-    private fun przycisk(tekst: String, kolor: Int, akcja: () -> Unit): Button {
+    private fun przycisk(tekst: String, kolor: Int, rozmiar: Float = 15f, akcja: () -> Unit): Button {
         val b = Button(this)
         b.text = tekst
         b.isAllCaps = false
         b.setTextColor(Color.WHITE)
-        b.textSize = 15f
+        b.textSize = rozmiar
         val tlo = GradientDrawable()
-        tlo.cornerRadius = dp(8).toFloat()
+        tlo.cornerRadius = dp(10).toFloat()
         tlo.setColor(kolor)
         b.background = tlo
         b.setPadding(dp(10), dp(8), dp(10), dp(8))
@@ -188,194 +194,255 @@ class MainActivity : AppCompatActivity() {
         return p
     }
 
-    private fun zbudujWidok() {
-        val glowny = LinearLayout(this)
-        glowny.orientation = LinearLayout.VERTICAL
-        glowny.setPadding(dp(12), dp(12), dp(12), dp(12))
-        glowny.setBackgroundColor(Color.rgb(245, 248, 252))
+    private fun lpPelny(gora: Int): LinearLayout.LayoutParams {
+        val p = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(64))
+        p.topMargin = dp(gora)
+        return p
+    }
 
-        val tytul = TextView(this)
-        tytul.text = "Skaner BHP"
-        tytul.textSize = 22f
-        tytul.setTypeface(null, Typeface.BOLD)
-        tytul.setTextColor(Color.rgb(0, 105, 92))
-        glowny.addView(tytul)
+    private fun tekst(t: String, rozmiar: Float, kolor: Int, gruby: Boolean = false): TextView {
+        val v = TextView(this)
+        v.text = t
+        v.textSize = rozmiar
+        v.setTextColor(kolor)
+        if (gruby) v.setTypeface(null, Typeface.BOLD)
+        return v
+    }
 
-        tStatus = TextView(this)
-        tStatus.textSize = 15f
-        tStatus.setTypeface(null, Typeface.BOLD)
-        tStatus.setPadding(0, dp(4), 0, dp(6))
-        glowny.addView(tStatus)
+    private fun zbudujStart() {
+        ekranStart = LinearLayout(this)
+        ekranStart.orientation = LinearLayout.VERTICAL
+        ekranStart.setPadding(dp(18), dp(24), dp(18), dp(18))
+        ekranStart.setBackgroundColor(Color.rgb(245, 248, 252))
+
+        ekranStart.addView(tekst("Skaner BHP", 30f, Color.rgb(0, 105, 92), true))
+        ekranStart.addView(tekst("Odzież i ŚOI - Program BHP", 15f, szary))
+
+        tSiec = tekst("", 15f, szary, true)
+        tSiec.setPadding(0, dp(16), 0, 0)
+        ekranStart.addView(tSiec)
+        tKomputerStart = tekst("", 14f, szary)
+        tKomputerStart.setPadding(0, dp(4), 0, dp(8))
+        ekranStart.addView(tKomputerStart)
+
+        bVpn = przycisk("Włącz GlobalProtect", niebieski, 17f) { otworzGlobalProtect() }
+        ekranStart.addView(bVpn, lpPelny(4))
+
+        ekranStart.addView(przycisk("Wydanie", Color.rgb(46, 125, 50), 22f) { pokazWydanie() }, lpPelny(18))
+        ekranStart.addView(przycisk("Dostawa", Color.rgb(93, 64, 55), 22f) {
+            Toast.makeText(this, "Dostawa - w następnym kroku", Toast.LENGTH_SHORT).show()
+        }, lpPelny(12))
+        ekranStart.addView(przycisk("Inwentura", Color.rgb(2, 119, 189), 22f) {
+            Toast.makeText(this, "Inwentura - w następnym kroku", Toast.LENGTH_SHORT).show()
+        }, lpPelny(12))
+
+        val odstep = View(this)
+        ekranStart.addView(odstep, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        ekranStart.addView(przycisk("Zakończ", czerwony, 20f) { zakoncz() }, lpPelny(12))
+    }
+
+    private fun zbudujWydanie() {
+        ekranWydanie = LinearLayout(this)
+        ekranWydanie.orientation = LinearLayout.VERTICAL
+        ekranWydanie.setPadding(dp(12), dp(12), dp(12), dp(12))
+        ekranWydanie.setBackgroundColor(Color.rgb(245, 248, 252))
 
         val w1 = wiersz()
-        val etykieta = TextView(this)
-        etykieta.text = "Komputer:"
-        etykieta.textSize = 15f
-        w1.addView(etykieta)
-        spKomputer = Spinner(this)
-        w1.addView(spKomputer, lp(1f, 6))
-        w1.addView(przycisk("Połącz", Color.rgb(21, 101, 192)) { polacz() }, lp(0.5f, 6))
-        glowny.addView(w1)
+        w1.addView(przycisk("← Menu", szary) { pokazStart() })
+        val tyt = tekst("  Wydanie", 22f, Color.rgb(46, 125, 50), true)
+        w1.addView(tyt, lp(1f))
+        w1.addView(przycisk("Zakończ", czerwony) { zakoncz() })
+        ekranWydanie.addView(w1)
 
-        val w2 = wiersz()
-        w2.setPadding(0, dp(6), 0, dp(6))
-        w2.addView(przycisk("Parowanie", Color.rgb(0, 131, 143)) { widocznyDoParowania() }, lp(1f))
-        bLatarka = przycisk("Latarka", Color.rgb(121, 85, 72)) { przelaczLatarke() }
-        w2.addView(bLatarka, lp(1f, 6))
-        w2.addView(przycisk("Test sieci", Color.rgb(57, 73, 171)) { testSieci() }, lp(1f, 6))
-        glowny.addView(w2)
+        tKomputer = tekst("", 14f, szary, true)
+        tKomputer.setPadding(0, dp(6), 0, dp(6))
+        ekranWydanie.addView(tKomputer)
 
         podglad = PreviewView(this)
         podglad.scaleType = PreviewView.ScaleType.FILL_CENTER
-        val pp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
-        glowny.addView(podglad, pp)
+        ekranWydanie.addView(podglad, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        tKod = TextView(this)
-        tKod.text = "Skieruj aparat na kod kreskowy"
-        tKod.textSize = 26f
-        tKod.setTypeface(null, Typeface.BOLD)
+        tKod = tekst("Skieruj aparat na kod kreskowy", 24f, szary, true)
         tKod.gravity = Gravity.CENTER
-        tKod.setTextColor(szary)
-        tKod.setPadding(0, dp(8), 0, dp(4))
-        glowny.addView(tKod)
+        tKod.setPadding(0, dp(6), 0, dp(2))
+        ekranWydanie.addView(tKod)
 
-        tWynik = TextView(this)
-        tWynik.textSize = 15f
-        tWynik.setTypeface(null, Typeface.BOLD)
+        tWynik = tekst("", 15f, szary, true)
         tWynik.gravity = Gravity.CENTER
         tWynik.setPadding(0, 0, 0, dp(4))
-        glowny.addView(tWynik)
+        ekranWydanie.addView(tWynik)
 
         val w3 = wiersz()
         w3.addView(przycisk("+1 ten sam", Color.rgb(46, 125, 50)) { ponowTenSam() }, lp(1f))
         w3.addView(przycisk("Cofnij", Color.rgb(121, 85, 72)) { cofnij() }, lp(1f, 6))
-        w3.addView(przycisk("Wyczyść listę", Color.rgb(96, 125, 139)) { wyczyscListe() }, lp(1.2f, 6))
-        glowny.addView(w3)
+        bLatarka = przycisk("Latarka", Color.rgb(96, 125, 139)) { przelaczLatarke() }
+        w3.addView(bLatarka, lp(1f, 6))
+        ekranWydanie.addView(w3)
 
-        listaPrzewijanie = ScrollView(this)
+        val przew = ScrollView(this)
         listaWidok = LinearLayout(this)
         listaWidok.orientation = LinearLayout.VERTICAL
         listaWidok.setPadding(0, dp(6), 0, dp(6))
-        listaPrzewijanie.addView(listaWidok)
-        glowny.addView(listaPrzewijanie, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        przew.addView(listaWidok)
+        ekranWydanie.addView(przew, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
         val w4 = wiersz()
-        w4.setPadding(0, dp(6), 0, dp(4))
-        cbEnter = CheckBox(this)
-        cbEnter.text = "Enter"
-        cbEnter.isChecked = true
-        w4.addView(cbEnter)
         eReczny = EditText(this)
         eReczny.hint = "kod ręcznie"
         eReczny.inputType = InputType.TYPE_CLASS_NUMBER
         w4.addView(eReczny, lp(1f))
-        w4.addView(przycisk("Wyślij", Color.rgb(106, 27, 154)) { wyslijRecznie() }, lp(0.6f, 6))
-        glowny.addView(w4)
-
-        tHistoria = TextView(this)
-        tHistoria.textSize = 13f
-        tHistoria.setTextColor(Color.rgb(55, 71, 79))
-        tHistoria.maxLines = 3
-        glowny.addView(tHistoria)
-
-        setContentView(glowny)
+        w4.addView(przycisk("Wyślij", Color.rgb(106, 27, 154)) { wyslijRecznie() }, lp(0.5f, 6))
+        ekranWydanie.addView(w4)
         pokazListe()
-        status("Uruchamianie ...", szary)
     }
 
-    private fun status(tekst: String, kolor: Int) {
-        tStatus.text = tekst
-        tStatus.setTextColor(kolor)
+    private fun pokazStart() {
+        naWydaniu = false
+        zatrzymajKamere()
+        setContentView(ekranStart)
+        pokazStan()
     }
 
-    @SuppressLint("MissingPermission")
-    private fun nazwa(d: BluetoothDevice?): String {
-        if (d == null) return "-"
+    private fun pokazWydanie() {
+        naWydaniu = true
+        setContentView(ekranWydanie)
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            uruchomKamere()
+        } else {
+            prosbaKamera.launch(Manifest.permission.CAMERA)
+        }
+        pokazStan()
+    }
+
+    // ------------------------------------------------------------------
+    //  SIEĆ / VPN / KOMPUTER
+    // ------------------------------------------------------------------
+    private fun vpnWlaczony(): Boolean {
         return try {
-            d.name ?: d.address
-        } catch (e: SecurityException) {
-            d.address
+            val cm = getSystemService(ConnectivityManager::class.java)
+            cm.allNetworks.any { n -> cm.getNetworkCapabilities(n)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true }
+        } catch (e: Exception) {
+            false
         }
     }
 
-    private fun pokazStatus() {
-        val k = klawiatura
-        when {
-            k == null -> status("Bluetooth nieaktywny", czerwony)
-            k.polaczony != null -> status("Połączono z: ${nazwa(k.polaczony)} - gotowy do skanowania", zielony)
-            k.blad != null -> status(k.blad ?: "", czerwony)
-            !k.zarejestrowany -> status("Włączanie trybu klawiatury ...", pomaranczowy)
-            k.cel == null -> status("Wybierz komputer z listy i kliknij Połącz", pomaranczowy)
-            else -> status("Nie połączono - komputer włączony i Bluetooth włączony? Kliknij Połącz.", czerwony)
-        }
-    }
-
-    // ------------------------------------------------------------------
-    //  BLUETOOTH
-    // ------------------------------------------------------------------
-    private fun wczytajUrzadzenia() {
-        val k = klawiatura ?: return
-        urzadzenia = k.sparowane()
-        val nazwy = urzadzenia.map { nazwa(it) }.ifEmpty { listOf("(brak sparowanych - kliknij Parowanie)") }
-        val ad = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, nazwy)
-        wypelniaListe = true
-        spKomputer.adapter = ad
-        val zapisany = getSharedPreferences("skaner", MODE_PRIVATE).getString("komputer", null)
-        val idx = urzadzenia.indexOfFirst { it.address == zapisany }
-        if (idx >= 0) {
-            spKomputer.setSelection(idx)
-            k.cel = urzadzenia[idx]
-        }
-        spKomputer.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (wypelniaListe) {
-                    wypelniaListe = false
-                    return
-                }
-                if (position < urzadzenia.size) {
-                    val d = urzadzenia[position]
-                    getSharedPreferences("skaner", MODE_PRIVATE).edit().putString("komputer", d.address).apply()
-                    klawiatura?.cel = d
-                    klawiatura?.polacz()
-                    pokazStatus()
+    private fun adresTelefonu(): String {
+        var wynik = ""
+        try {
+            for (ni in NetworkInterface.getNetworkInterfaces()) {
+                if (!ni.isUp || ni.isLoopback) continue
+                for (a in ni.inetAddresses) {
+                    if (a is Inet4Address && !a.isLoopbackAddress) {
+                        val ip = a.hostAddress ?: continue
+                        if (ni.name.startsWith("tun") || ni.name.startsWith("ppp") || wynik.isEmpty()) wynik = ip
+                    }
                 }
             }
-
-            override fun onNothingSelected(parent: AdapterView<*>?) {}
-        }
-    }
-
-    private fun polacz() {
-        val k = klawiatura ?: return
-        wczytajUrzadzenia()
-        val pos = spKomputer.selectedItemPosition
-        if (pos >= 0 && pos < urzadzenia.size) {
-            val d = urzadzenia[pos]
-            getSharedPreferences("skaner", MODE_PRIVATE).edit().putString("komputer", d.address).apply()
-            k.cel = d
-        }
-        k.polacz()
-        status("Łączenie z ${nazwa(k.cel)} ...", pomaranczowy)
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun widocznyDoParowania() {
-        if (Build.VERSION.SDK_INT >= 31 && !ma(Manifest.permission.BLUETOOTH_ADVERTISE)) {
-            prosba.launch(potrzebneUprawnienia())
-            return
-        }
-        val i = Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
-        i.putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 120)
-        try {
-            startActivity(i)
-            status("Telefon widoczny 2 min - na komputerze: Ustawienia > Bluetooth > Dodaj urządzenie", pomaranczowy)
         } catch (e: Exception) {
-            status("Nie udało się włączyć widoczności: ${e.message}", czerwony)
+        }
+        return wynik
+    }
+
+    private fun komputerWidziany(): Boolean = ostatniKontakt > 0 && SystemClock.elapsedRealtime() - ostatniKontakt < 5000
+
+    private fun pokazStan() {
+        val vpn = vpnWlaczony()
+        val ip = adresTelefonu()
+        if (vpn) {
+            tSiec.text = "✔ GlobalProtect włączony   (telefon: $ip)"
+            tSiec.setTextColor(zielony)
+            bVpn.visibility = View.GONE
+        } else {
+            tSiec.text = "GlobalProtect wyłączony - włącz, żeby komputer widział telefon"
+            tSiec.setTextColor(czerwony)
+            bVpn.visibility = View.VISIBLE
+        }
+        val k = if (komputerWidziany()) {
+            "✔ Komputer połączony ($adresKomputera)"
+        } else if (ostatniKontakt > 0) {
+            "Komputer nie odpytuje - w Programie BHP otwórz Wydanie"
+        } else {
+            "Komputer jeszcze się nie połączył - Wydanie -> \"Lista na telefon\""
+        }
+        val kolor = if (komputerWidziany()) zielony else pomaranczowy
+        tKomputerStart.text = k
+        tKomputerStart.setTextColor(kolor)
+        if (::tKomputer.isInitialized) {
+            tKomputer.text = if (vpn) k else "GlobalProtect wyłączony - wróć do Menu i włącz"
+            tKomputer.setTextColor(if (vpn) kolor else czerwony)
+        }
+    }
+
+    private fun otworzGlobalProtect() {
+        val i = packageManager.getLaunchIntentForPackage("com.paloaltonetworks.globalprotect")
+        if (i != null) {
+            startActivity(i)
+        } else {
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=com.paloaltonetworks.globalprotect")))
+            } catch (e: Exception) {
+                Toast.makeText(this, "Otwórz GlobalProtect ręcznie", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    // --- serwer (wątki sieciowe) ---
+    override fun ping(): String = "SKANER_BHP|" + (if (naWydaniu) "WYDANIE" else "MENU")
+
+    override fun komputer(adres: String) {
+        ostatniKontakt = SystemClock.elapsedRealtime()
+        adresKomputera = adres
+    }
+
+    override fun lista(tekst: String) {
+        synchronized(skany) {
+            skany.clear()
+            nastepnyNr = 1
+        }
+        runOnUiThread {
+            if (!naWydaniu) pokazWydanie()
+            wczytajListe(tekst)
+        }
+    }
+
+    override fun skany(od: Int): String {
+        synchronized(skany) {
+            return skany.filter { it.nr >= od }.joinToString("\n") { "${it.nr}|${it.kod}" }
+        }
+    }
+
+    override fun wynik(tekst: String) {
+        val p = tekst.split("|", limit = 3)
+        if (p.size < 3) return
+        val kolor = when (p[1]) {
+            "1" -> zielony
+            "2" -> czerwony
+            "3" -> pomaranczowy
+            else -> szary
+        }
+        runOnUiThread {
+            tWynik.text = "Komputer: " + p[2]
+            tWynik.setTextColor(kolor)
+            if (p[1] == "2" || p[1] == "3") ton?.startTone(ToneGenerator.TONE_SUP_ERROR, 300)
+        }
+    }
+
+    override fun koniec(tekst: String) {
+        runOnUiThread {
+            lista.clear()
+            cofanie.clear()
+            listaTekst = null
+            pokazListe()
+            tKod.text = "Wydano ✔"
+            tKod.setTextColor(zielony)
+            tWynik.text = if (tekst.isNotBlank()) tekst else "Wydanie zapisane w komputerze"
+            tWynik.setTextColor(zielony)
+            ton?.startTone(ToneGenerator.TONE_PROP_BEEP2, 300)
         }
     }
 
     // ------------------------------------------------------------------
-    //  APARAT + ODCZYT KODÓW
+    //  APARAT
     // ------------------------------------------------------------------
     private fun uruchomKamere() {
         if (skaner == null) {
@@ -392,6 +459,8 @@ class MainActivity : AppCompatActivity() {
         przyszly.addListener({
             try {
                 val dostawca = przyszly.get()
+                dostawcaKamery = dostawca
+                if (!naWydaniu) return@addListener
                 val preview = Preview.Builder().build()
                 preview.setSurfaceProvider(podglad.surfaceProvider)
                 val analiza = ImageAnalysis.Builder()
@@ -405,6 +474,16 @@ class MainActivity : AppCompatActivity() {
                 tKod.setTextColor(czerwony)
             }
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun zatrzymajKamere() {
+        try {
+            dostawcaKamery?.unbindAll()
+        } catch (e: Exception) {
+        }
+        kamera = null
+        latarka = false
+        if (::bLatarka.isInitialized) bLatarka.text = "Latarka"
     }
 
     @androidx.annotation.OptIn(ExperimentalGetImage::class)
@@ -422,7 +501,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun obsluzKody(kody: List<Barcode>) {
-        // kod QR z listą z komputera - wczytaj, nie wysyłaj
+        if (!naWydaniu) return
+        // QR z listą (zapasowo, gdy nie ma sieci)
         val qr = kody.firstOrNull { it.format == Barcode.FORMAT_QR_CODE && (it.rawValue ?: "").startsWith("BHP1") }
         if (qr != null) {
             val t = qr.rawValue ?: return
@@ -436,7 +516,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         ostatnioWidziany = teraz
-        if (kod == kodWKadrze) return               // ten sam karton dalej w kadrze
+        if (kod == kodWKadrze) return
         if (teraz - ostatnioWyslany < 800) return
         kodWKadrze = kod
         wyslij(kod)
@@ -444,25 +524,62 @@ class MainActivity : AppCompatActivity() {
 
     private fun wyslij(kod: String) {
         ostatnioWyslany = SystemClock.elapsedRealtime()
-        ostatniWyslanyKod = kod
-        val ok = klawiatura?.wyslij(kod, cbEnter.isChecked) == true
-        tKod.text = kod
-        if (ok) {
-            tKod.setTextColor(zielony)
-            ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
-            dodajHistorie("✔ $kod")
-            sprawdzNaLiscie(kod)
-        } else {
-            tKod.setTextColor(czerwony)
-            ton?.startTone(ToneGenerator.TONE_SUP_ERROR, 400)
-            dodajHistorie("✖ $kod - NIE wysłano (brak połączenia)")
-            status("Brak połączenia z komputerem - kod NIE wysłany. Kliknij Połącz.", czerwony)
+        if (kod != "-") ostatniWyslanyKod = kod
+        synchronized(skany) {
+            skany.add(Skan(nastepnyNr, kod))
+            nastepnyNr++
+            while (skany.size > 500) skany.removeAt(0)
         }
+        if (kod == "-") return
+        tKod.text = kod
+        tKod.setTextColor(niebieski)
+        ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
         podglad.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        if (!komputerWidziany()) {
+            tWynik.text = "Komputer nie odbiera - kod czeka. Otwórz Wydanie i kliknij \"Lista na telefon\"."
+            tWynik.setTextColor(czerwony)
+        }
+        sprawdzNaLiscie(kod)
+    }
+
+    private fun ponowTenSam() {
+        val k = ostatniWyslanyKod
+        if (k == null) {
+            Toast.makeText(this, "Najpierw zeskanuj kod", Toast.LENGTH_SHORT).show()
+            return
+        }
+        wyslij(k)
+    }
+
+    private fun wyslijRecznie() {
+        val k = eReczny.text.toString().trim()
+        if (k.isEmpty()) return
+        wyslij(k)
+        eReczny.setText("")
+    }
+
+    private fun cofnij() {
+        wyslij("-")
+        val nr = cofanie.removeLastOrNull()
+        if (nr != null && nr >= 0 && nr < lista.size) {
+            val p = lista[nr]
+            if (p.skany.isNotEmpty()) p.skany.removeAt(p.skany.size - 1)
+            p.uwaga = false
+        }
+        tWynik.text = "Cofnięto ostatni skan (też w komputerze)"
+        tWynik.setTextColor(szary)
+        pokazListe()
+    }
+
+    private fun przelaczLatarke() {
+        val k = kamera ?: return
+        latarka = !latarka
+        k.cameraControl.enableTorch(latarka)
+        bLatarka.text = if (latarka) "Latarka: wł." else "Latarka"
     }
 
     // ------------------------------------------------------------------
-    //  LISTA DO WYDANIA (QR z okna Wydanie)
+    //  LISTA DO WYDANIA
     //  BHP1 \n nazwa|ilosc|rozmiar|wariant0,wariant1|r195=35.0;w12=-.0;e5902...=42.1
     // ------------------------------------------------------------------
     private fun polskie(s: String): String {
@@ -489,10 +606,9 @@ class MainActivity : AppCompatActivity() {
     private fun wczytajListe(tekst: String) {
         val nowa = mutableListOf<Pozycja>()
         try {
-            val linie = tekst.split("\n")
-            for (l in linie.drop(1)) {
+            for (l in tekst.split("\n").drop(1)) {
                 if (l.isBlank()) continue
-                val p = l.split("|")
+                val p = l.trimEnd('\r').split("|")
                 if (p.size < 5) continue
                 val warianty = p[3].split(",").map { polskie(it.trim()) }
                 val wpisy = HashMap<String, Wpis>()
@@ -500,10 +616,7 @@ class MainActivity : AppCompatActivity() {
                     val r = w.indexOf('=')
                     val kropka = w.lastIndexOf('.')
                     if (r <= 0 || kropka < r) continue
-                    val klucz = w.substring(0, r)
-                    val rozm = polskie(w.substring(r + 1, kropka))
-                    val nrW = w.substring(kropka + 1).toIntOrNull() ?: 0
-                    wpisy[klucz] = Wpis(rozm, nrW)
+                    wpisy[w.substring(0, r)] = Wpis(polskie(w.substring(r + 1, kropka)), w.substring(kropka + 1).toIntOrNull() ?: 0)
                 }
                 nowa.add(Pozycja(polskie(p[0]), p[1].toIntOrNull() ?: 1, polskie(p[2]), warianty, wpisy))
             }
@@ -517,15 +630,13 @@ class MainActivity : AppCompatActivity() {
         cofanie.clear()
         listaTekst = tekst
         ton?.startTone(ToneGenerator.TONE_PROP_BEEP2, 250)
-        podglad.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
         tKod.text = "Lista: ${lista.size} poz."
-        tKod.setTextColor(Color.rgb(21, 101, 192))
+        tKod.setTextColor(niebieski)
         tWynik.text = "Idź do magazynu i skanuj kartony"
         tWynik.setTextColor(szary)
         pokazListe()
     }
 
-    /** klucze, pod jakimi kod może być na liście */
     private fun klucze(kod: String): List<String> {
         val cyfry = kod.isNotEmpty() && kod.all { it.isDigit() }
         if (cyfry && kod.length == 8 && (kod.startsWith("21") || kod.startsWith("22"))) {
@@ -539,10 +650,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun sprawdzNaLiscie(kod: String) {
-        if (lista.isEmpty()) {
-            tWynik.text = ""
-            return
-        }
+        if (lista.isEmpty()) return
         val kl = klucze(kod)
         var nr = -1
         var wpis: Wpis? = null
@@ -559,54 +667,37 @@ class MainActivity : AppCompatActivity() {
         }
         if (wpis == null || nr < 0) {
             cofanie.addLast(-1)
-            tWynik.text = "\u2716 Nie z listy (inny rozmiar?) - sprawdź na komputerze"
-            tWynik.setTextColor(czerwony)
-            ton?.startTone(ToneGenerator.TONE_SUP_ERROR, 400)
+            if (komputerWidziany()) {
+                tWynik.text = "Nie z listy (inny rozmiar?) - czekam na komputer"
+                tWynik.setTextColor(pomaranczowy)
+            }
             return
         }
         val p = lista[nr]
         p.skany.add(wpis)
         cofanie.addLast(nr)
-        val nazwaW = if (p.warianty.size > 1 && wpis.wariant < p.warianty.size) p.warianty[wpis.wariant] + " " else ""
-        val innyRozmiar = p.rozmiar.isNotBlank() && wpis.rozmiar != "-" && !wpis.rozmiar.equals(p.rozmiar, ignoreCase = true)
-        when {
-            innyRozmiar -> {
-                p.uwaga = true
-                tWynik.text = "UWAGA: ${p.nazwa} rozm. ${wpis.rozmiar} - na liście rozm. ${p.rozmiar}"
-                tWynik.setTextColor(pomaranczowy)
-                ton?.startTone(ToneGenerator.TONE_SUP_ERROR, 300)
-            }
-            p.skany.size > p.ilosc -> {
-                p.uwaga = true
-                tWynik.text = "UWAGA: ${p.nazwa} ponad listę (ma być ${p.ilosc})"
-                tWynik.setTextColor(pomaranczowy)
-                ton?.startTone(ToneGenerator.TONE_SUP_ERROR, 300)
-            }
-            else -> {
-                tWynik.text = "\u2714 ${p.nazwa}: $nazwaW${wpis.rozmiar}  (${p.skany.size}/${p.ilosc})"
-                tWynik.setTextColor(zielony)
-            }
-        }
+        val innyRozmiar = p.rozmiar.isNotBlank() && p.rozmiar != "-" && wpis.rozmiar != "-" &&
+                !wpis.rozmiar.equals(p.rozmiar, ignoreCase = true)
+        if (innyRozmiar || p.skany.size > p.ilosc) p.uwaga = true
         pokazListe()
     }
 
     private fun pokazListe() {
         listaWidok.removeAllViews()
         if (lista.isEmpty()) {
-            val t = TextView(this)
-            t.text = "Lista do wydania: w Programie BHP (Wydanie) kliknij \"Lista na telefon\" i skieruj aparat na kod QR."
-            t.textSize = 14f
-            t.setTextColor(szary)
-            listaWidok.addView(t)
+            listaWidok.addView(tekst("Lista do wydania: w Programie BHP (Wydanie) wybierz pracownika i kliknij \"Lista na telefon\".", 14f, szary))
             return
         }
         var gotowe = 0
         for (p in lista) {
-            val t = TextView(this)
             val komplet = p.skany.size >= p.ilosc
             if (komplet) gotowe++
-            val znak = if (komplet) "\u2714" else "\u2610"
-            val roz = if (p.rozmiar.isNotBlank() && p.rozmiar != "-") "rozm. ${p.rozmiar}" else if (p.rozmiar == "-") "" else "rozm. ?"
+            val znak = if (komplet) "✔" else "☐"
+            val roz = when {
+                p.rozmiar == "-" -> ""
+                p.rozmiar.isNotBlank() -> "rozm. ${p.rozmiar}"
+                else -> "rozm. ?"
+            }
             val sb = StringBuilder("$znak ${p.nazwa}  $roz   ${p.skany.size}/${p.ilosc}")
             if (p.skany.isNotEmpty()) {
                 sb.append("\n      ")
@@ -614,164 +705,34 @@ class MainActivity : AppCompatActivity() {
                     (if (p.warianty.size > 1 && w.wariant < p.warianty.size) p.warianty[w.wariant] + " " else "") + w.rozmiar
                 })
             }
-            t.text = sb.toString()
-            t.textSize = 16f
-            t.setPadding(dp(4), dp(5), dp(4), dp(5))
-            t.setTypeface(null, if (komplet) Typeface.BOLD else Typeface.NORMAL)
-            t.setTextColor(
+            val t = tekst(sb.toString(), 16f,
                 when {
                     p.uwaga -> pomaranczowy
                     komplet -> zielony
                     else -> Color.rgb(38, 50, 56)
-                }
-            )
+                }, komplet)
+            t.setPadding(dp(4), dp(5), dp(4), dp(5))
             listaWidok.addView(t)
         }
-        val s = TextView(this)
-        s.text = "Gotowe: $gotowe z ${lista.size}"
-        s.textSize = 14f
-        s.setTypeface(null, Typeface.BOLD)
-        s.setTextColor(if (gotowe == lista.size) zielony else szary)
+        val s = tekst("Gotowe: $gotowe z ${lista.size}", 14f, if (gotowe == lista.size) zielony else szary, true)
         s.setPadding(dp(4), dp(6), dp(4), 0)
         listaWidok.addView(s)
     }
 
-    private fun cofnij() {
-        val ok = klawiatura?.wyslij("-", true) == true
-        if (!ok) {
-            status("Brak połączenia z komputerem - nie cofnięto. Kliknij Połącz.", czerwony)
-            return
-        }
-        val nr = cofanie.removeLastOrNull()
-        if (nr != null && nr >= 0 && nr < lista.size) {
-            val p = lista[nr]
-            if (p.skany.isNotEmpty()) p.skany.removeAt(p.skany.size - 1)
-            p.uwaga = false
-        }
-        tWynik.text = "Cofnięto ostatni skan (też w komputerze)"
-        tWynik.setTextColor(szary)
-        dodajHistorie("\u21B6 cofnięto")
-        pokazListe()
-    }
-
-    private fun wyczyscListe() {
-        lista.clear()
-        cofanie.clear()
-        listaTekst = null
-        tWynik.text = ""
-        pokazListe()
-    }
-
-    private fun ponowTenSam() {
-        val k = ostatniWyslanyKod
-        if (k == null) {
-            status("Najpierw zeskanuj kod", pomaranczowy)
-            return
-        }
-        wyslij(k)
-    }
-
-    private fun wyslijRecznie() {
-        val k = eReczny.text.toString().trim()
-        if (k.isEmpty()) return
-        wyslij(k)
-        eReczny.setText("")
-    }
-
-    private fun dodajHistorie(s: String) {
-        historia.addFirst(s)
-        while (historia.size > 5) historia.removeLast()
-        tHistoria.text = historia.joinToString("\n")
-    }
-
     // ------------------------------------------------------------------
-    //  TEST SIECI: czy komputer widzi telefon (Wi-Fi / GlobalProtect)
-    //  telefon odpowiada na http://<adres>:8080 - komputer otwiera to w przeglądarce
+    //  ZAKOŃCZ - całkowicie (nie w tle)
     // ------------------------------------------------------------------
-    @Volatile private var serwer: ServerSocket? = null
-
-    private fun adresyIp(): List<String> {
-        val l = mutableListOf<String>()
-        try {
-            for (ni in NetworkInterface.getNetworkInterfaces()) {
-                if (!ni.isUp || ni.isLoopback) continue
-                for (a in ni.inetAddresses) {
-                    if (a is Inet4Address && !a.isLoopbackAddress) l.add("${a.hostAddress}  (${ni.name})")
-                }
-            }
-        } catch (e: Exception) {
-        }
-        return l
-    }
-
-    private fun testSieci() {
-        val adresy = adresyIp()
-        if (adresy.isEmpty()) {
-            tWynik.text = "Brak sieci w telefonie (włącz Wi-Fi albo GlobalProtect)"
-            tWynik.setTextColor(czerwony)
-            return
-        }
-        if (serwer == null) {
-            Thread {
-                try {
-                    val s = ServerSocket(8080)
-                    serwer = s
-                    while (!s.isClosed) {
-                        val k = s.accept()
-                        val kto = k.inetAddress.hostAddress
-                        try {
-                            k.getInputStream().read(ByteArray(2048))
-                            val html = "<html><head><meta charset='utf-8'></head><body style='font-family:sans-serif'>" +
-                                    "<h1 style='color:#2e7d32'>Skaner BHP - połączenie działa \u2714</h1>" +
-                                    "<p>Komputer $kto widzi telefon. Napisz o tym w czacie.</p></body></html>"
-                            val dane = html.toByteArray(Charsets.UTF_8)
-                            val nag = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${dane.size}\r\nConnection: close\r\n\r\n"
-                            val o = k.getOutputStream()
-                            o.write(nag.toByteArray(Charsets.US_ASCII))
-                            o.write(dane)
-                            o.flush()
-                        } catch (e: Exception) {
-                        }
-                        k.close()
-                        runOnUiThread {
-                            tWynik.text = "\u2714 Komputer $kto połączył się z telefonem - sieć działa!"
-                            tWynik.setTextColor(zielony)
-                            ton?.startTone(ToneGenerator.TONE_PROP_BEEP2, 300)
-                        }
-                    }
-                } catch (e: Exception) {
-                    runOnUiThread {
-                        tWynik.text = "Test sieci: ${e.message}"
-                        tWynik.setTextColor(czerwony)
-                    }
-                }
-            }.start()
-        }
-        val t = adresy.joinToString("\n") { "http://" + it.substringBefore(" ") + ":8080   " + it.substringAfter(" ") }
-        tWynik.text = "Na komputerze wpisz w przeglądarce:\n$t"
-        tWynik.setTextColor(Color.rgb(57, 73, 171))
-    }
-
-    private fun przelaczLatarke() {
-        val k = kamera ?: return
-        latarka = !latarka
-        k.cameraControl.enableTorch(latarka)
-        bLatarka.text = if (latarka) "Latarka: wł." else "Latarka"
-    }
-
-    override fun onResume() {
-        super.onResume()
-        if (klawiatura != null) pokazStatus()
+    private fun zakoncz() {
+        zatrzymajKamere()
+        serwer.stop()
+        handler.removeCallbacksAndMessages(null)
+        finishAndRemoveTask()
+        Handler(Looper.getMainLooper()).postDelayed({ exitProcess(0) }, 300)
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        klawiatura?.stop()
-        klawiatura = null
-        try {
-            serwer?.close()
-        } catch (e: Exception) {
-        }
+        serwer.stop()
         watekKamery.shutdown()
         skaner?.close()
         ton?.release()
