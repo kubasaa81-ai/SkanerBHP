@@ -1,0 +1,43 @@
+name: Zbuduj APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Klucz podpisu
+        run: base64 -d app/klucz.b64 > app/klucz.jks
+
+      - name: Budowanie
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Nazwa pliku
+        run: cp app/build/outputs/apk/debug/app-debug.apk SkanerBHP.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SkanerBHP
+          path: SkanerBHP.apk
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: Skaner BHP ${{ github.run_number }}
+          files: SkanerBHP.apk
