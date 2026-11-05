@@ -45,6 +45,9 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import java.net.Inet4Address
+import java.net.NetworkInterface
+import java.net.ServerSocket
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -219,6 +222,7 @@ class MainActivity : AppCompatActivity() {
         w2.addView(przycisk("Parowanie", Color.rgb(0, 131, 143)) { widocznyDoParowania() }, lp(1f))
         bLatarka = przycisk("Latarka", Color.rgb(121, 85, 72)) { przelaczLatarke() }
         w2.addView(bLatarka, lp(1f, 6))
+        w2.addView(przycisk("Test sieci", Color.rgb(57, 73, 171)) { testSieci() }, lp(1f, 6))
         glowny.addView(w2)
 
         podglad = PreviewView(this)
@@ -680,6 +684,74 @@ class MainActivity : AppCompatActivity() {
         tHistoria.text = historia.joinToString("\n")
     }
 
+    // ------------------------------------------------------------------
+    //  TEST SIECI: czy komputer widzi telefon (Wi-Fi / GlobalProtect)
+    //  telefon odpowiada na http://<adres>:8080 - komputer otwiera to w przeglądarce
+    // ------------------------------------------------------------------
+    @Volatile private var serwer: ServerSocket? = null
+
+    private fun adresyIp(): List<String> {
+        val l = mutableListOf<String>()
+        try {
+            for (ni in NetworkInterface.getNetworkInterfaces()) {
+                if (!ni.isUp || ni.isLoopback) continue
+                for (a in ni.inetAddresses) {
+                    if (a is Inet4Address && !a.isLoopbackAddress) l.add("${a.hostAddress}  (${ni.name})")
+                }
+            }
+        } catch (e: Exception) {
+        }
+        return l
+    }
+
+    private fun testSieci() {
+        val adresy = adresyIp()
+        if (adresy.isEmpty()) {
+            tWynik.text = "Brak sieci w telefonie (włącz Wi-Fi albo GlobalProtect)"
+            tWynik.setTextColor(czerwony)
+            return
+        }
+        if (serwer == null) {
+            Thread {
+                try {
+                    val s = ServerSocket(8080)
+                    serwer = s
+                    while (!s.isClosed) {
+                        val k = s.accept()
+                        val kto = k.inetAddress.hostAddress
+                        try {
+                            k.getInputStream().read(ByteArray(2048))
+                            val html = "<html><head><meta charset='utf-8'></head><body style='font-family:sans-serif'>" +
+                                    "<h1 style='color:#2e7d32'>Skaner BHP - połączenie działa \u2714</h1>" +
+                                    "<p>Komputer $kto widzi telefon. Napisz o tym w czacie.</p></body></html>"
+                            val dane = html.toByteArray(Charsets.UTF_8)
+                            val nag = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${dane.size}\r\nConnection: close\r\n\r\n"
+                            val o = k.getOutputStream()
+                            o.write(nag.toByteArray(Charsets.US_ASCII))
+                            o.write(dane)
+                            o.flush()
+                        } catch (e: Exception) {
+                        }
+                        k.close()
+                        runOnUiThread {
+                            tWynik.text = "\u2714 Komputer $kto połączył się z telefonem - sieć działa!"
+                            tWynik.setTextColor(zielony)
+                            ton?.startTone(ToneGenerator.TONE_PROP_BEEP2, 300)
+                        }
+                    }
+                } catch (e: Exception) {
+                    runOnUiThread {
+                        tWynik.text = "Test sieci: ${e.message}"
+                        tWynik.setTextColor(czerwony)
+                    }
+                }
+            }.start()
+        }
+        val t = adresy.joinToString("\n") { "http://" + it.substringBefore(" ") + ":8080   " + it.substringAfter(" ") }
+        tWynik.text = "Na komputerze wpisz w przeglądarce:\n$t"
+        tWynik.setTextColor(Color.rgb(57, 73, 171))
+    }
+
     private fun przelaczLatarke() {
         val k = kamera ?: return
         latarka = !latarka
@@ -696,6 +768,10 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         klawiatura?.stop()
         klawiatura = null
+        try {
+            serwer?.close()
+        } catch (e: Exception) {
+        }
         watekKamery.shutdown()
         skaner?.close()
         ton?.release()

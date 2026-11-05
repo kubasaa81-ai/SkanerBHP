@@ -134,11 +134,15 @@ class HidKlawiatura(private val ctx: Context, private val zmiana: () -> Unit) {
         val d = polaczony ?: return false
         watekWysylki.execute {
             try {
-                for (c in tekst) {
-                    val k = klawisz(c) ?: continue
-                    nacisnij(h, d, k.first, k.second)
+                // szybko: kolejny klawisz od razu zastępuje poprzedni (puszczenie tylko przy powtórce)
+                var poprzedni: Pair<Int, Int>? = null
+                val znaki = tekst.mapNotNull { klawisz(it) } + (if (enter) listOf(Pair(0, 0x28)) else emptyList())
+                for (k in znaki) {
+                    if (k == poprzedni) raport(h, d, 0, 0)
+                    raport(h, d, k.first, k.second)
+                    poprzedni = k
                 }
-                if (enter) nacisnij(h, d, 0, 0x28)
+                raport(h, d, 0, 0)
             } catch (e: Exception) {
                 blad = "Błąd wysyłania: ${e.message}"
                 zmiana()
@@ -147,14 +151,12 @@ class HidKlawiatura(private val ctx: Context, private val zmiana: () -> Unit) {
         return true
     }
 
-    private fun nacisnij(h: BluetoothHidDevice, d: BluetoothDevice, mod: Int, kod: Int) {
+    private fun raport(h: BluetoothHidDevice, d: BluetoothDevice, mod: Int, kod: Int) {
         val r = ByteArray(8)
         r[0] = mod.toByte()
         r[2] = kod.toByte()
         h.sendReport(d, 1, r)
-        Thread.sleep(15)
-        h.sendReport(d, 1, ByteArray(8))
-        Thread.sleep(15)
+        Thread.sleep(8)
     }
 
     /** znak -> (modyfikator, kod klawisza USB HID) */
