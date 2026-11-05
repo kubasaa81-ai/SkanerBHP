@@ -14,6 +14,7 @@ import java.util.concurrent.Executors
  *   GET  /skany?od=N      -> zeskanowane kody od numeru N, linie "N|kod"
  *   POST /wynik           -> "N|kolor|tekst" - wynik sprawdzenia skanu w komputerze (1 OK, 2 błąd, 3 uwaga)
  *   POST /koniec          -> wydanie zapisane - lista zamknięta
+ *   POST /katalog         -> katalog pozycji magazynu (Dostawa / Inwentura / Kody)
  */
 class Serwer(private val obsluga: Obsluga) {
 
@@ -24,6 +25,7 @@ class Serwer(private val obsluga: Obsluga) {
         fun wynik(tekst: String)
         fun koniec(tekst: String)
         fun komputer(adres: String)
+        fun katalog(tekst: String)
     }
 
     @Volatile private var gniazdo: ServerSocket? = null
@@ -111,6 +113,7 @@ class Serwer(private val obsluga: Obsluga) {
                 }
                 sciezka == "/wynik" && metoda == "POST" -> { obsluga.wynik(cialo); "OK" }
                 sciezka == "/koniec" && metoda == "POST" -> { obsluga.koniec(cialo); "OK" }
+                sciezka == "/katalog" && metoda == "POST" -> { obsluga.katalog(cialo); "OK" }
                 sciezka == "/" -> "Skaner BHP - połączenie działa ✔"
                 else -> "?"
             }

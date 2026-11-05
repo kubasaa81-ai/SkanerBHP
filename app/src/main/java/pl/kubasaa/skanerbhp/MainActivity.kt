@@ -21,7 +21,11 @@ import android.view.Gravity
 import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.WindowManager
+import android.app.AlertDialog
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.Spinner
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -52,8 +56,10 @@ import kotlin.system.exitProcess
 
 /**
  * Skaner BHP - telefon jako skaner dla Programu BHP (Excel) przez sieć firmową (GlobalProtect).
- * Ekran startowy: Wydanie / Dostawa / Inwentura / Zakończ.
+ * Ekran startowy: Wydanie / Dostawa / Inwentura / Kody / Zakończ.
  * Wydanie: komputer wysyła listę "co wydać", aparat czyta kody, komputer pobiera skany i odsyła wynik.
+ * Dostawa / Inwentura / Kody: katalog z komputera (warianty, rozmiary, stany, kody producenta) -
+ *   znany kod = od razu pozycja, nieznany = wybór z listy i przypisanie kodu; polecenia @DOST / @INW / @KOD.
  */
 class MainActivity : AppCompatActivity(), Serwer.Obsluga {
 
@@ -65,7 +71,29 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
 
     private lateinit var ekranStart: LinearLayout
     private lateinit var ekranWydanie: LinearLayout
-    private var naWydaniu = false
+    private lateinit var ekranMag: LinearLayout
+    @Volatile private var tryb = "MENU"            // MENU / WYDANIE / DOSTAWA / INWENTURA / KODY
+    private val naWydaniu: Boolean get() = tryb == "WYDANIE"
+
+    // magazyn (dostawa / inwentura / kody)
+    private lateinit var podgladWyd: PreviewView
+    private lateinit var podgladMag: PreviewView
+    private lateinit var tTytulMag: TextView
+    private lateinit var tKomputerMag: TextView
+    private lateinit var tPozycja: TextView
+    private lateinit var tStanProg: TextView
+    private lateinit var wIlosc: LinearLayout
+    private lateinit var eIlosc: EditText
+    private lateinit var bAkcja: Button
+    private lateinit var tWynikMag: TextView
+    private lateinit var historiaMag: LinearLayout
+    private var wybrana: Kat? = null
+    private var oknoOtwarte = false
+
+    // katalog z komputera
+    private class Kat(val w: Int, val r: Int, val asort: String, val wariant: String, val rozm: String, var stan: Int, val kody: MutableList<String>)
+    private var katalog: List<Kat> = emptyList()
+    @Volatile private var katWersja = "0"
 
     // start
     private lateinit var tSiec: TextView
@@ -74,7 +102,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
 
     // wydanie
     private lateinit var tKomputer: TextView
-    private lateinit var podglad: PreviewView
+    private var podgladAkt: PreviewView? = null
     private lateinit var tKod: TextView
     private lateinit var tWynik: TextView
     private lateinit var listaWidok: LinearLayout
@@ -145,11 +173,12 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         }
         zbudujStart()
         zbudujWydanie()
+        zbudujMagazyn()
         pokazStart()
         val blad = serwer.start(8080)
         if (blad != null) Toast.makeText(this, "Serwer: $blad", Toast.LENGTH_LONG).show()
         onBackPressedDispatcher.addCallback(this) {
-            if (naWydaniu) pokazStart() else moveTaskToBack(true)
+            if (tryb != "MENU") pokazStart() else moveTaskToBack(true)
         }
     }
 
@@ -231,12 +260,9 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         ekranStart.addView(bVpn, lpPelny(4))
 
         ekranStart.addView(przycisk("Wydanie", Color.rgb(46, 125, 50), 22f) { pokazWydanie() }, lpPelny(18))
-        ekranStart.addView(przycisk("Dostawa", Color.rgb(93, 64, 55), 22f) {
-            Toast.makeText(this, "Dostawa - w następnym kroku", Toast.LENGTH_SHORT).show()
-        }, lpPelny(12))
-        ekranStart.addView(przycisk("Inwentura", Color.rgb(2, 119, 189), 22f) {
-            Toast.makeText(this, "Inwentura - w następnym kroku", Toast.LENGTH_SHORT).show()
-        }, lpPelny(12))
+        ekranStart.addView(przycisk("Dostawa", Color.rgb(93, 64, 55), 22f) { pokazMagazyn("DOSTAWA") }, lpPelny(12))
+        ekranStart.addView(przycisk("Inwentura", Color.rgb(2, 119, 189), 22f) { pokazMagazyn("INWENTURA") }, lpPelny(12))
+        ekranStart.addView(przycisk("Kody producenta", Color.rgb(239, 108, 0), 20f) { pokazMagazyn("KODY") }, lpPelny(12))
 
         val odstep = View(this)
         ekranStart.addView(odstep, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -260,9 +286,9 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         tKomputer.setPadding(0, dp(6), 0, dp(6))
         ekranWydanie.addView(tKomputer)
 
-        podglad = PreviewView(this)
-        podglad.scaleType = PreviewView.ScaleType.FILL_CENTER
-        ekranWydanie.addView(podglad, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        podgladWyd = PreviewView(this)
+        podgladWyd.scaleType = PreviewView.ScaleType.FILL_CENTER
+        ekranWydanie.addView(podgladWyd, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
         tKod = tekst("Skieruj aparat na kod kreskowy", 24f, szary, true)
         tKod.gravity = Gravity.CENTER
@@ -299,21 +325,27 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     }
 
     private fun pokazStart() {
-        naWydaniu = false
+        tryb = "MENU"
         zatrzymajKamere()
         setContentView(ekranStart)
         pokazStan()
     }
 
     private fun pokazWydanie() {
-        naWydaniu = true
+        zatrzymajKamere()
+        tryb = "WYDANIE"
+        podgladAkt = podgladWyd
         setContentView(ekranWydanie)
+        wlaczKamere()
+        pokazStan()
+    }
+
+    private fun wlaczKamere() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             uruchomKamere()
         } else {
             prosbaKamera.launch(Manifest.permission.CAMERA)
         }
-        pokazStan()
     }
 
     // ------------------------------------------------------------------
@@ -373,6 +405,15 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             tKomputer.text = if (vpn) k else "GlobalProtect wyłączony - wróć do Menu i włącz"
             tKomputer.setTextColor(if (vpn) kolor else czerwony)
         }
+        if (::tKomputerMag.isInitialized) {
+            tKomputerMag.text = when {
+                !vpn -> "GlobalProtect wyłączony - wróć do Menu i włącz"
+                katalog.isEmpty() -> "Czekam na katalog - w komputerze otwórz Magazyn odzieży"
+                komputerWidziany() -> "\u2714 Komputer połączony, katalog: ${katalog.size} poz."
+                else -> "Komputer nie odpytuje - w komputerze otwórz Magazyn odzieży"
+            }
+            tKomputerMag.setTextColor(if (vpn && komputerWidziany() && katalog.isNotEmpty()) zielony else pomaranczowy)
+        }
     }
 
     private fun otworzGlobalProtect() {
@@ -389,7 +430,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     }
 
     // --- serwer (wątki sieciowe) ---
-    override fun ping(): String = "SKANER_BHP|" + (if (naWydaniu) "WYDANIE" else "MENU")
+    override fun ping(): String = "SKANER_BHP|$tryb"
 
     override fun komputer(adres: String) {
         ostatniKontakt = SystemClock.elapsedRealtime()
@@ -403,7 +444,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             sesja = System.currentTimeMillis() % 1000000
         }
         runOnUiThread {
-            if (!naWydaniu) pokazWydanie()
+            if (tryb == "MENU") pokazWydanie()          // w Dostawie / Inwenturze lista tylko się wczytuje
             wczytajListe(tekst)
         }
     }
@@ -411,7 +452,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     override fun skany(od: Int): String {
         synchronized(skany) {
             val linie = skany.filter { it.nr >= od }.joinToString("") { "\n${it.nr}|${it.kod}" }
-            return "SESJA|$sesja$linie\nLISTA|" + (if (maListe) "1" else "0")
+            return "SESJA|$sesja$linie\nLISTA|" + (if (maListe) "1" else "0") + "\nKATALOG|$katWersja"
         }
     }
 
@@ -425,8 +466,9 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             else -> szary
         }
         runOnUiThread {
-            tWynik.text = "Komputer: " + p[2]
-            tWynik.setTextColor(kolor)
+            val t = if (naWydaniu || !::tWynikMag.isInitialized) tWynik else tWynikMag
+            t.text = "Komputer: " + p[2]
+            t.setTextColor(kolor)
             if (p[1] == "2" || p[1] == "3") ton?.startTone(ToneGenerator.TONE_SUP_ERROR, 300)
         }
     }
@@ -465,9 +507,9 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             try {
                 val dostawca = przyszly.get()
                 dostawcaKamery = dostawca
-                if (!naWydaniu) return@addListener
+                if (tryb == "MENU") return@addListener
                 val preview = Preview.Builder().build()
-                preview.setSurfaceProvider(podglad.surfaceProvider)
+                preview.setSurfaceProvider((podgladAkt ?: podgladWyd).surfaceProvider)
                 val analiza = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
@@ -506,7 +548,23 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     }
 
     private fun obsluzKody(kody: List<Barcode>) {
-        if (!naWydaniu) return
+        if (tryb == "MENU") return
+        if (!naWydaniu) {
+            if (oknoOtwarte) return
+            val teraz = SystemClock.elapsedRealtime()
+            val kod = kody.firstOrNull { it.format != Barcode.FORMAT_QR_CODE && !it.rawValue.isNullOrEmpty() }?.rawValue
+            if (kod == null) {
+                if (teraz - ostatnioWidziany > 700) kodWKadrze = null
+                return
+            }
+            ostatnioWidziany = teraz
+            if (kod == kodWKadrze) return
+            if (teraz - ostatnioWyslany < 800) return
+            kodWKadrze = kod
+            ostatnioWyslany = teraz
+            kodMagazynu(kod)
+            return
+        }
         // QR z listą (zapasowo, gdy nie ma sieci)
         val qr = kody.firstOrNull { it.format == Barcode.FORMAT_QR_CODE && (it.rawValue ?: "").startsWith("BHP1") }
         if (qr != null) {
@@ -539,7 +597,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         tKod.text = kod
         tKod.setTextColor(niebieski)
         ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
-        podglad.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        (podgladAkt ?: podgladWyd).performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
         if (!komputerWidziany()) {
             tWynik.text = "Komputer nie odbiera - kod czeka. Otwórz Wydanie i kliknij \"Lista na telefon\"."
             tWynik.setTextColor(czerwony)
@@ -723,6 +781,316 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         val s = tekst("Gotowe: $gotowe z ${lista.size}", 14f, if (gotowe == lista.size) zielony else szary, true)
         s.setPadding(dp(4), dp(6), dp(4), 0)
         listaWidok.addView(s)
+    }
+
+    // ------------------------------------------------------------------
+    //  KATALOG (z komputera):  KAT1|wersja  /  war|rozm|asortyment|wariant|rozmiar|stan|kod1,kod2
+    // ------------------------------------------------------------------
+    override fun katalog(tekst: String) {
+        val nowy = mutableListOf<Kat>()
+        var wersja = "0"
+        try {
+            val linie = tekst.split("\n")
+            if (linie.isEmpty() || !linie[0].startsWith("KAT1")) return
+            wersja = linie[0].substringAfter("|", "0").trim()
+            for (l in linie.drop(1)) {
+                val p = l.trimEnd('\r').split("|")
+                if (p.size < 7) continue
+                val kody = p[6].split(",").map { it.trim() }.filter { it.isNotEmpty() }.toMutableList()
+                nowy.add(Kat(p[0].toIntOrNull() ?: continue, p[1].toIntOrNull() ?: 0, polskie(p[2]), polskie(p[3]),
+                    polskie(p[4]), p[5].toIntOrNull() ?: 0, kody))
+            }
+        } catch (e: Exception) {
+            return
+        }
+        runOnUiThread {
+            katalog = nowy
+            katWersja = wersja
+            val w = wybrana
+            if (w != null) {
+                val nowa = katalog.firstOrNull { it.w == w.w && it.r == w.r }
+                if (nowa != null) {
+                    wybrana = nowa
+                    pokazWybrana()
+                }
+            }
+            pokazStan()
+        }
+    }
+
+    private fun znajdzWKatalogu(kod: String): Kat? {
+        val cyfry = kod.isNotEmpty() && kod.all { it.isDigit() }
+        if (cyfry && kod.length == 8 && (kod.startsWith("21") || kod.startsWith("22"))) {
+            val id = kod.substring(2, 7).toIntOrNull() ?: return null
+            return if (kod.startsWith("21")) katalog.firstOrNull { it.r == id } else katalog.firstOrNull { it.w == id && it.r == 0 }
+        }
+        val k13 = if (cyfry && kod.length == 12) "0$kod" else kod
+        val k12 = if (k13.length == 13 && k13.startsWith("0")) k13.substring(1) else k13
+        return katalog.firstOrNull { p -> p.kody.any { it == k13 || it == k12 || it == kod } }
+    }
+
+    private fun opisKat(k: Kat): String = if (k.rozm == "-" || k.rozm.isBlank()) k.wariant else "${k.wariant}\nrozm. ${k.rozm}"
+
+    // ------------------------------------------------------------------
+    //  EKRAN MAGAZYNU: Dostawa / Inwentura / Kody
+    // ------------------------------------------------------------------
+    private fun zbudujMagazyn() {
+        ekranMag = LinearLayout(this)
+        ekranMag.orientation = LinearLayout.VERTICAL
+        ekranMag.setPadding(dp(12), dp(12), dp(12), dp(12))
+        ekranMag.setBackgroundColor(Color.rgb(245, 248, 252))
+
+        val w1 = wiersz()
+        w1.addView(przycisk("\u2190 Menu", szary) { pokazStart() })
+        tTytulMag = tekst("  Dostawa", 22f, Color.rgb(93, 64, 55), true)
+        w1.addView(tTytulMag, lp(1f))
+        w1.addView(przycisk("Zakończ", czerwony) { zakoncz() })
+        ekranMag.addView(w1)
+
+        tKomputerMag = tekst("", 14f, szary, true)
+        tKomputerMag.setPadding(0, dp(6), 0, dp(6))
+        ekranMag.addView(tKomputerMag)
+
+        podgladMag = PreviewView(this)
+        podgladMag.scaleType = PreviewView.ScaleType.FILL_CENTER
+        ekranMag.addView(podgladMag, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 0.8f))
+
+        tPozycja = tekst("Zeskanuj kod kartonu / opakowania", 20f, szary, true)
+        tPozycja.gravity = Gravity.CENTER
+        tPozycja.setPadding(0, dp(8), 0, 0)
+        ekranMag.addView(tPozycja)
+        tStanProg = tekst("", 15f, szary)
+        tStanProg.gravity = Gravity.CENTER
+        ekranMag.addView(tStanProg)
+
+        wIlosc = wiersz()
+        wIlosc.setPadding(0, dp(6), 0, dp(6))
+        wIlosc.addView(przycisk("\u2212", Color.rgb(96, 125, 139), 24f) { zmienIlosc(-1) }, lp(0.6f))
+        eIlosc = EditText(this)
+        eIlosc.inputType = InputType.TYPE_CLASS_NUMBER
+        eIlosc.textSize = 24f
+        eIlosc.gravity = Gravity.CENTER
+        eIlosc.hint = "ilość"
+        wIlosc.addView(eIlosc, lp(1f, 6))
+        wIlosc.addView(przycisk("+", Color.rgb(96, 125, 139), 24f) { zmienIlosc(1) }, lp(0.6f, 6))
+        bAkcja = przycisk("Dodaj do dostawy", Color.rgb(46, 125, 50), 17f) { akcjaMagazynu() }
+        wIlosc.addView(bAkcja, lp(1.6f, 8))
+        ekranMag.addView(wIlosc)
+
+        val w3 = wiersz()
+        w3.addView(przycisk("Wybierz z listy (bez kodu)", Color.rgb(106, 27, 154)) { wybierzZListy(null) }, lp(1f))
+        val bLat = przycisk("Latarka", Color.rgb(96, 125, 139)) { przelaczLatarke() }
+        w3.addView(bLat, lp(0.5f, 6))
+        ekranMag.addView(w3)
+
+        tWynikMag = tekst("", 15f, szary, true)
+        tWynikMag.gravity = Gravity.CENTER
+        tWynikMag.setPadding(0, dp(6), 0, dp(4))
+        ekranMag.addView(tWynikMag)
+
+        val przew = ScrollView(this)
+        historiaMag = LinearLayout(this)
+        historiaMag.orientation = LinearLayout.VERTICAL
+        przew.addView(historiaMag)
+        ekranMag.addView(przew, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 0.7f))
+    }
+
+    private fun pokazMagazyn(t: String) {
+        zatrzymajKamere()
+        tryb = t
+        podgladAkt = podgladMag
+        wybrana = null
+        when (t) {
+            "DOSTAWA" -> {
+                tTytulMag.text = "  Dostawa"
+                tTytulMag.setTextColor(Color.rgb(93, 64, 55))
+                bAkcja.text = "Dodaj do dostawy"
+            }
+            "INWENTURA" -> {
+                tTytulMag.text = "  Inwentura"
+                tTytulMag.setTextColor(Color.rgb(2, 119, 189))
+                bAkcja.text = "Zapisz stan"
+            }
+            else -> {
+                tTytulMag.text = "  Kody producenta"
+                tTytulMag.setTextColor(Color.rgb(239, 108, 0))
+            }
+        }
+        wIlosc.visibility = if (t == "KODY") View.GONE else View.VISIBLE
+        historiaMag.removeAllViews()
+        tWynikMag.text = when (t) {
+            "DOSTAWA" -> "Skanuj kartony z dostawy - pozycje dopiszą się w komputerze (Magazyn -> Dostawa)"
+            "INWENTURA" -> "Skanuj karton, policz i wpisz ilość - stan zapisze się w komputerze"
+            else -> "Skanuj kody z opakowań - nieznany kod przypiszesz z listy"
+        }
+        tWynikMag.setTextColor(szary)
+        pokazWybrana()
+        setContentView(ekranMag)
+        wlaczKamere()
+        pokazStan()
+    }
+
+    private fun pokazWybrana() {
+        val k = wybrana
+        if (k == null) {
+            tPozycja.text = "Zeskanuj kod kartonu / opakowania"
+            tPozycja.setTextColor(szary)
+            tStanProg.text = ""
+            eIlosc.setText("")
+            bAkcja.isEnabled = false
+            return
+        }
+        tPozycja.text = opisKat(k)
+        tPozycja.setTextColor(Color.rgb(38, 50, 56))
+        tStanProg.text = "w programie: ${k.stan} szt." + if (k.kody.isNotEmpty()) "   (kod producenta: ${k.kody.size})" else ""
+        bAkcja.isEnabled = true
+    }
+
+    private fun zmienIlosc(o: Int) {
+        val n = (eIlosc.text.toString().toIntOrNull() ?: 0) + o
+        eIlosc.setText((if (n < 0) 0 else n).toString())
+    }
+
+    private fun kodMagazynu(kod: String) {
+        if (katalog.isEmpty()) {
+            tWynikMag.text = "Nie ma jeszcze katalogu - w komputerze otwórz Magazyn odzieży"
+            tWynikMag.setTextColor(czerwony)
+            ton?.startTone(ToneGenerator.TONE_SUP_ERROR, 300)
+            return
+        }
+        ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
+        podgladMag.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        val k = znajdzWKatalogu(kod)
+        if (k == null) {
+            tWynikMag.text = "Nieznany kod $kod - wybierz, co to jest"
+            tWynikMag.setTextColor(pomaranczowy)
+            wybierzZListy(kod)
+            return
+        }
+        ustawWybrana(k, "Kod $kod")
+    }
+
+    private fun ustawWybrana(k: Kat, skad: String) {
+        wybrana = k
+        pokazWybrana()
+        when (tryb) {
+            "DOSTAWA" -> eIlosc.setText("1")
+            "INWENTURA" -> eIlosc.setText("")
+        }
+        if (tryb == "KODY") {
+            tWynikMag.text = "$skad = ${opisKat(k).replace("\n", ", ")}"
+            tWynikMag.setTextColor(zielony)
+        } else {
+            tWynikMag.text = if (tryb == "INWENTURA") "Policz i wpisz ilość, potem \"Zapisz stan\"" else "Popraw ilość, potem \"Dodaj do dostawy\""
+            tWynikMag.setTextColor(szary)
+            eIlosc.requestFocus()
+            eIlosc.selectAll()
+        }
+    }
+
+    private fun akcjaMagazynu() {
+        val k = wybrana ?: return
+        val il = eIlosc.text.toString().toIntOrNull()
+        if (il == null || (tryb == "DOSTAWA" && il <= 0) || il < 0) {
+            tWynikMag.text = "Wpisz ilość"
+            tWynikMag.setTextColor(czerwony)
+            return
+        }
+        val polecenie = if (tryb == "DOSTAWA") "@DOST" else "@INW"
+        wyslijPolecenie("$polecenie|${k.w}|${k.r}|$il")
+        val opis = opisKat(k).replace("\n", ", ")
+        dodajHistorieMag(if (tryb == "DOSTAWA") "+$il  $opis" else "stan $il  $opis  (było ${k.stan})")
+        if (tryb == "INWENTURA") k.stan = il
+        tWynikMag.text = if (komputerWidziany()) "Wysłano - czekam na komputer ..." else "Komputer nie odbiera - wyśle się, gdy otworzysz Magazyn odzieży"
+        tWynikMag.setTextColor(if (komputerWidziany()) szary else czerwony)
+        wybrana = null
+        pokazWybrana()
+    }
+
+    private fun wyslijPolecenie(tekst: String) {
+        synchronized(skany) {
+            skany.add(Skan(nastepnyNr, tekst))
+            nastepnyNr++
+            while (skany.size > 500) skany.removeAt(0)
+        }
+    }
+
+    private fun dodajHistorieMag(s: String) {
+        val t = tekst(s, 15f, Color.rgb(38, 50, 56))
+        t.setPadding(dp(4), dp(4), dp(4), dp(4))
+        historiaMag.addView(t, 0)
+        while (historiaMag.childCount > 30) historiaMag.removeViewAt(historiaMag.childCount - 1)
+    }
+
+    /** wybór pozycji z katalogu: asortyment -> wariant -> rozmiar;  kod != null = przypisanie kodu */
+    private fun wybierzZListy(kod: String?) {
+        if (katalog.isEmpty()) {
+            tWynikMag.text = "Nie ma jeszcze katalogu - w komputerze otwórz Magazyn odzieży"
+            tWynikMag.setTextColor(czerwony)
+            return
+        }
+        val uklad = LinearLayout(this)
+        uklad.orientation = LinearLayout.VERTICAL
+        uklad.setPadding(dp(16), dp(8), dp(16), dp(8))
+        val spA = Spinner(this)
+        val spW = Spinner(this)
+        val spR = Spinner(this)
+        uklad.addView(tekst("Asortyment", 13f, szary))
+        uklad.addView(spA)
+        uklad.addView(tekst("Wariant", 13f, szary))
+        uklad.addView(spW)
+        uklad.addView(tekst("Rozmiar", 13f, szary))
+        uklad.addView(spR)
+
+        val asorty = katalog.map { it.asort }.distinct()
+        var warianty: List<String> = emptyList()
+        var pozycje: List<Kat> = emptyList()
+        spA.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, asorty)
+        fun ustawRozmiary() {
+            val wn = warianty.getOrNull(spW.selectedItemPosition)
+            pozycje = katalog.filter { it.asort == asorty.getOrNull(spA.selectedItemPosition) && it.wariant == wn }
+            spR.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item,
+                pozycje.map { (if (it.rozm == "-") "bez rozmiaru" else it.rozm) + "   (stan ${it.stan})" })
+        }
+        fun ustawWarianty() {
+            val a = asorty.getOrNull(spA.selectedItemPosition)
+            warianty = katalog.filter { it.asort == a }.map { it.wariant }.distinct()
+            spW.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, warianty)
+            ustawRozmiary()
+        }
+        spA.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) = ustawWarianty()
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+        spW.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) = ustawRozmiary()
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+        ustawWarianty()
+
+        oknoOtwarte = true
+        AlertDialog.Builder(this)
+            .setTitle(if (kod != null) "Przypisz kod $kod do:" else "Wybierz pozycję")
+            .setView(uklad)
+            .setPositiveButton(if (kod != null) "Przypisz" else "Wybierz") { _, _ ->
+                val k = pozycje.getOrNull(spR.selectedItemPosition)
+                if (k != null) {
+                    if (kod != null) {
+                        wyslijPolecenie("@KOD|$kod|${k.w}|${k.r}")
+                        k.kody.add(if (kod.length == 12 && kod.all { it.isDigit() }) "0$kod" else kod)
+                        dodajHistorieMag("kod $kod -> ${opisKat(k).replace("\n", ", ")}")
+                        ustawWybrana(k, "Kod $kod")
+                    } else {
+                        ustawWybrana(k, "Wybrano")
+                    }
+                }
+            }
+            .setNegativeButton("Anuluj", null)
+            .setOnDismissListener {
+                oknoOtwarte = false
+                kodWKadrze = null
+            }
+            .show()
     }
 
     // ------------------------------------------------------------------
