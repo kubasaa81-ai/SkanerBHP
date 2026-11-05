@@ -117,6 +117,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     }
     private val lista = mutableListOf<Pozycja>()
     private var listaTekst: String? = null
+    @Volatile private var maListe = false       // dla komputera: czy telefon ma listę (gdy nie - komputer ją wyśle)
     private val cofanie = ArrayDeque<Int>()
 
     private val prosbaKamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
@@ -410,7 +411,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     override fun skany(od: Int): String {
         synchronized(skany) {
             val linie = skany.filter { it.nr >= od }.joinToString("") { "\n${it.nr}|${it.kod}" }
-            return "SESJA|$sesja$linie"
+            return "SESJA|$sesja$linie\nLISTA|" + (if (maListe) "1" else "0")
         }
     }
 
@@ -435,6 +436,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             lista.clear()
             cofanie.clear()
             listaTekst = null
+            maListe = false
             pokazListe()
             tKod.text = "Wydano ✔"
             tKod.setTextColor(zielony)
@@ -632,6 +634,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         lista.addAll(nowa)
         cofanie.clear()
         listaTekst = tekst
+        maListe = true
         ton?.startTone(ToneGenerator.TONE_PROP_BEEP2, 250)
         tKod.text = "Lista: ${lista.size} poz."
         tKod.setTextColor(niebieski)
