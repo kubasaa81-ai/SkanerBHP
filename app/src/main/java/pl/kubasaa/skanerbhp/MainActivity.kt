@@ -136,17 +136,26 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
 
     // lista do wydania
     private class Wpis(val rozmiar: String, val wariant: Int)
+    // sztuka zeskanowana: nr skanu (do wyniku z komputera), kod (do cofnięcia), ok = komputer policzył
+    private class Sztuka(val wpis: Wpis, val nr: Int, val kod: String) {
+        var ok = false
+    }
     private class Pozycja(
         val nazwa: String, val ilosc: Int, val rozmiar: String,
         val warianty: List<String>, val wpisy: Map<String, Wpis>
     ) {
-        val skany = mutableListOf<Wpis>()
+        val skany = mutableListOf<Sztuka>()
         var uwaga = false
     }
     private val lista = mutableListOf<Pozycja>()
     private var listaTekst: String? = null
     @Volatile private var maListe = false       // dla komputera: czy telefon ma listę (gdy nie - komputer ją wyśle)
-    private val cofanie = ArrayDeque<Int>()
+    private val cofanie = ArrayDeque<Int>()      // numery skanów sztuk na liście (kolejność - do "Cofnij")
+
+    // skan tylko po naciśnięciu SKANUJ (przytrzymanie aparatu nie dodaje kilku sztuk)
+    private var uzbrojony = false
+    private lateinit var bSkanuj: Button
+    private val rozbroj = Runnable { ustawSkanuj(false) }
 
     private val prosbaKamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         if (ok) uruchomKamere() else {
@@ -290,7 +299,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         podgladWyd.scaleType = PreviewView.ScaleType.FILL_CENTER
         ekranWydanie.addView(podgladWyd, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        tKod = tekst("Skieruj aparat na kod kreskowy", 24f, szary, true)
+        tKod = tekst("Naciśnij SKANUJ i skieruj aparat na kod", 20f, szary, true)
         tKod.gravity = Gravity.CENTER
         tKod.setPadding(0, dp(6), 0, dp(2))
         ekranWydanie.addView(tKod)
@@ -300,7 +309,11 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         tWynik.setPadding(0, 0, 0, dp(4))
         ekranWydanie.addView(tWynik)
 
+        bSkanuj = przycisk("SKANUJ", niebieski, 22f) { ustawSkanuj(!uzbrojony) }
+        ekranWydanie.addView(bSkanuj, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(64)))
+
         val w3 = wiersz()
+        w3.setPadding(0, dp(6), 0, 0)
         w3.addView(przycisk("+1 ten sam", Color.rgb(46, 125, 50)) { ponowTenSam() }, lp(1f))
         w3.addView(przycisk("Cofnij", Color.rgb(121, 85, 72)) { cofnij() }, lp(1f, 6))
         bLatarka = przycisk("Latarka", Color.rgb(96, 125, 139)) { przelaczLatarke() }
@@ -457,8 +470,14 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     }
 
     override fun wynik(tekst: String) {
-        val p = tekst.split("|", limit = 3)
+        // "nr|kolor|D|tekst"  (D: 1 = komputer policzył sztukę, 0 = odrzucił)  albo stare "nr|kolor|tekst"
+        val p4 = tekst.split("|", limit = 4)
+        val nowy = p4.size >= 4 && (p4[2] == "0" || p4[2] == "1")
+        val p = if (nowy) listOf(p4[0], p4[1], p4[3]) else tekst.split("|", limit = 3)
         if (p.size < 3) return
+        val nrSkanu = p[0].toIntOrNull() ?: -1
+        val dodano = if (nowy) p4[2] == "1" else true
+        runOnUiThread { potwierdzSztuke(nrSkanu, dodano) }
         val kolor = when (p[1]) {
             "1" -> zielony
             "2" -> czerwony
@@ -572,28 +591,38 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             if (t != listaTekst) wczytajListe(t)
             return
         }
-        val teraz = SystemClock.elapsedRealtime()
-        val kod = kody.firstOrNull { it.format != Barcode.FORMAT_QR_CODE && !it.rawValue.isNullOrEmpty() }?.rawValue
-        if (kod == null) {
-            if (teraz - ostatnioWidziany > 700) kodWKadrze = null
-            return
-        }
-        ostatnioWidziany = teraz
-        if (kod == kodWKadrze) return
-        if (teraz - ostatnioWyslany < 800) return
+        if (!uzbrojony) return                       // bez SKANUJ aparat tylko pokazuje obraz
+        val kod = kody.firstOrNull { it.format != Barcode.FORMAT_QR_CODE && !it.rawValue.isNullOrEmpty() }?.rawValue ?: return
+        ustawSkanuj(false)                            // jeden kod na jedno naciśnięcie
         kodWKadrze = kod
+        ostatnioWidziany = SystemClock.elapsedRealtime()
         wyslij(kod)
+    }
+
+    private fun ustawSkanuj(tak: Boolean) {
+        uzbrojony = tak
+        handler.removeCallbacks(rozbroj)
+        if (!::bSkanuj.isInitialized) return
+        val tlo = GradientDrawable()
+        tlo.cornerRadius = dp(10).toFloat()
+        tlo.setColor(if (tak) pomaranczowy else niebieski)
+        bSkanuj.background = tlo
+        bSkanuj.text = if (tak) "SKANUJĘ... (dotknij = stop)" else "SKANUJ"
+        if (tak) handler.postDelayed(rozbroj, 6000)
     }
 
     private fun wyslij(kod: String) {
         ostatnioWyslany = SystemClock.elapsedRealtime()
-        if (kod != "-") ostatniWyslanyKod = kod
+        val polecenie = kod.startsWith("-")           // "-" cofnij ostatni, "-<kod>" cofnij tę sztukę
+        if (!polecenie) ostatniWyslanyKod = kod
+        val nr: Int
         synchronized(skany) {
+            nr = nastepnyNr
             skany.add(Skan(nastepnyNr, kod))
             nastepnyNr++
             while (skany.size > 500) skany.removeAt(0)
         }
-        if (kod == "-") return
+        if (polecenie) return
         tKod.text = kod
         tKod.setTextColor(niebieski)
         ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
@@ -602,7 +631,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             tWynik.text = "Komputer nie odbiera - kod czeka. Otwórz Wydanie i kliknij \"Lista na telefon\"."
             tWynik.setTextColor(czerwony)
         }
-        sprawdzNaLiscie(kod)
+        sprawdzNaLiscie(kod, nr)
     }
 
     private fun ponowTenSam() {
@@ -624,14 +653,67 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private fun cofnij() {
         wyslij("-")
         val nr = cofanie.removeLastOrNull()
-        if (nr != null && nr >= 0 && nr < lista.size) {
-            val p = lista[nr]
-            if (p.skany.isNotEmpty()) p.skany.removeAt(p.skany.size - 1)
-            p.uwaga = false
-        }
+        if (nr != null) usunSztuke(nr)
         tWynik.text = "Cofnięto ostatni skan (też w komputerze)"
         tWynik.setTextColor(szary)
         pokazListe()
+    }
+
+    // sztuka o numerze skanu - usunięcie z listy
+    private fun usunSztuke(nr: Int): Boolean {
+        for (p in lista) {
+            val i = p.skany.indexOfFirst { it.nr == nr }
+            if (i >= 0) {
+                p.skany.removeAt(i)
+                p.uwaga = przelicUwage(p)
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun przelicUwage(p: Pozycja): Boolean {
+        val inny = p.skany.any { s ->
+            p.rozmiar.isNotBlank() && p.rozmiar != "-" && s.wpis.rozmiar != "-" && !s.wpis.rozmiar.equals(p.rozmiar, ignoreCase = true)
+        }
+        return inny || p.skany.size > p.ilosc
+    }
+
+    // wynik z komputera: odrzucona sztuka znika z listy telefonu (lista = to, co w komputerze)
+    private fun potwierdzSztuke(nr: Int, dodano: Boolean) {
+        if (nr < 0) return
+        if (dodano) {
+            for (p in lista) p.skany.firstOrNull { it.nr == nr }?.ok = true
+        } else if (usunSztuke(nr)) {
+            cofanie.remove(nr)
+        }
+        pokazListe()
+    }
+
+    // dotknięcie pozycji na liście - wybór sztuki do cofnięcia
+    private fun cofnijWybrana(p: Pozycja) {
+        if (p.skany.isEmpty()) {
+            Toast.makeText(this, "Ta pozycja nie ma zeskanowanych sztuk", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val opisy = p.skany.map { s ->
+            (if (p.warianty.size > 1 && s.wpis.wariant < p.warianty.size) p.warianty[s.wpis.wariant] + " " else "") +
+                    (if (s.wpis.rozmiar == "-") "bez rozmiaru" else "rozm. " + s.wpis.rozmiar) + "   (kod " + s.kod + ")"
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Cofnij sztukę: " + p.nazwa)
+            .setItems(opisy) { _, i ->
+                val s = p.skany.getOrNull(i) ?: return@setItems
+                wyslij("-" + s.kod)
+                p.skany.removeAt(i)
+                cofanie.remove(s.nr)
+                p.uwaga = przelicUwage(p)
+                tWynik.text = "Cofnięto: " + opisy[i] + " (też w komputerze)"
+                tWynik.setTextColor(szary)
+                pokazListe()
+            }
+            .setNegativeButton("Anuluj", null)
+            .show()
     }
 
     private fun przelaczLatarke() {
@@ -713,7 +795,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         return l
     }
 
-    private fun sprawdzNaLiscie(kod: String) {
+    private fun sprawdzNaLiscie(kod: String, nrSkanu: Int) {
         if (lista.isEmpty()) return
         val kl = klucze(kod)
         var nr = -1
@@ -730,7 +812,6 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             if (wpis != null) break
         }
         if (wpis == null || nr < 0) {
-            cofanie.addLast(-1)
             if (komputerWidziany()) {
                 tWynik.text = "Nie z listy (inny rozmiar?) - czekam na komputer"
                 tWynik.setTextColor(pomaranczowy)
@@ -738,11 +819,9 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             return
         }
         val p = lista[nr]
-        p.skany.add(wpis)
-        cofanie.addLast(nr)
-        val innyRozmiar = p.rozmiar.isNotBlank() && p.rozmiar != "-" && wpis.rozmiar != "-" &&
-                !wpis.rozmiar.equals(p.rozmiar, ignoreCase = true)
-        if (innyRozmiar || p.skany.size > p.ilosc) p.uwaga = true
+        p.skany.add(Sztuka(wpis, nrSkanu, kod))
+        cofanie.addLast(nrSkanu)
+        p.uwaga = przelicUwage(p)
         pokazListe()
     }
 
@@ -765,8 +844,9 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             val sb = StringBuilder("$znak ${p.nazwa}  $roz   ${p.skany.size}/${p.ilosc}")
             if (p.skany.isNotEmpty()) {
                 sb.append("\n      ")
-                sb.append(p.skany.joinToString(", ") { w ->
-                    (if (p.warianty.size > 1 && w.wariant < p.warianty.size) p.warianty[w.wariant] + " " else "") + w.rozmiar
+                sb.append(p.skany.joinToString(", ") { s ->
+                    (if (p.warianty.size > 1 && s.wpis.wariant < p.warianty.size) p.warianty[s.wpis.wariant] + " " else "") +
+                            s.wpis.rozmiar + (if (s.ok) "" else " ?")
                 })
             }
             val t = tekst(sb.toString(), 16f,
@@ -776,11 +856,15 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                     else -> Color.rgb(38, 50, 56)
                 }, komplet)
             t.setPadding(dp(4), dp(5), dp(4), dp(5))
+            t.setOnClickListener { cofnijWybrana(p) }
             listaWidok.addView(t)
         }
         val s = tekst("Gotowe: $gotowe z ${lista.size}", 14f, if (gotowe == lista.size) zielony else szary, true)
         s.setPadding(dp(4), dp(6), dp(4), 0)
         listaWidok.addView(s)
+        val h = tekst("Dotknij pozycji, żeby cofnąć wybraną sztukę.  \"?\" = komputer jeszcze nie potwierdził.", 12f, szary)
+        h.setPadding(dp(4), dp(2), dp(4), 0)
+        listaWidok.addView(h)
     }
 
     // ------------------------------------------------------------------
