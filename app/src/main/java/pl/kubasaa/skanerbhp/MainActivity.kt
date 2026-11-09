@@ -38,10 +38,14 @@ import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageCapture
-import androidx.camera.core.ImageCaptureException
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Matrix
+import android.media.ExifInterface
+import android.text.Editable
+import android.text.TextWatcher
+import android.widget.ImageView
+import androidx.activity.result.PickVisualMediaRequest
 import java.io.File
 import java.io.FileOutputStream
 import androidx.camera.core.ImageProxy
@@ -66,8 +70,9 @@ import kotlin.system.exitProcess
  * Wydanie: komputer wysyła listę "co wydać", aparat czyta kody, komputer pobiera skany i odsyła wynik.
  * Dostawa / Inwentura / Kody: katalog z komputera (warianty, rozmiary, stany, kody producenta) -
  *   znany kod = od razu pozycja, nieznany = wybór z listy i przypisanie kodu; polecenia @DOST / @INW / @KOD.
- * Zdjęcia (wypadki): zdjęcia z miejsca wypadku z opisem - zapisane tylko w aplikacji (nie w galerii),
- *   komputer pobiera je do protokołu oględzin (Oględziny -> "Z telefonu") i wtedy telefon je kasuje.
+ * Zdjęcia (wypadki): zdjęcia zrobione zwykłym aparatem wybierasz z galerii (podgląd, opis każdego) -
+ *   kopie (pomniejszone) czekają w aplikacji, komputer pobiera je do protokołu oględzin
+ *   (Oględziny -> "Z telefonu") i wtedy aplikacja kasuje swoje kopie.
  */
 class MainActivity : AppCompatActivity(), Serwer.Obsluga {
 
@@ -105,13 +110,14 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     @Volatile private var katWersja = "0"
 
     // zdjęcia (wypadki): pliki w katalogu aplikacji  zdjecia/zdj_<nr>.jpg  +  zdj_<nr>.txt (opis)
-    private lateinit var podgladZdj: PreviewView
     private lateinit var tSprawaZdj: TextView
     private lateinit var tKomputerZdj: TextView
-    private lateinit var eOpisZdj: EditText
-    private lateinit var bZrob: Button
+    private lateinit var bGaleria: Button
     private lateinit var tStanZdj: TextView
-    private var przechwyt: ImageCapture? = null
+    private lateinit var listaZdj: LinearLayout
+    private val wyborZdjec = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(30)) { uris ->
+        if (uris.isNotEmpty()) importujZdjecia(uris)
+    }
     @Volatile private var sprawaZdj = ""
     private val folderZdj: File by lazy { File(filesDir, "zdjecia").apply { mkdirs() } }
 
@@ -558,38 +564,33 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         tKomputerZdj.setPadding(0, dp(2), 0, dp(6))
         ekranZdj.addView(tKomputerZdj)
 
-        podgladZdj = PreviewView(this)
-        podgladZdj.scaleType = PreviewView.ScaleType.FIT_CENTER
-        ekranZdj.addView(podgladZdj, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
-
-        eOpisZdj = EditText(this)
-        eOpisZdj.hint = "Opis zdjęcia (np. krawędź stopnia, na którym ...)"
-        eOpisZdj.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-        ekranZdj.addView(eOpisZdj, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-
-        bZrob = przycisk("ZRÓB ZDJĘCIE", czerwony, 22f) { zrobZdjecie() }
-        ekranZdj.addView(bZrob, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(64)))
+        bGaleria = przycisk("Wybierz zdjęcia z galerii", czerwony, 20f) {
+            wyborZdjec.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+        }
+        ekranZdj.addView(bGaleria, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(64)))
 
         tStanZdj = tekst("", 15f, szary, true)
         tStanZdj.gravity = Gravity.CENTER
         tStanZdj.setPadding(0, dp(6), 0, dp(6))
         ekranZdj.addView(tStanZdj)
 
-        val w2 = wiersz()
-        w2.addView(przycisk("Usuń ostatnie", Color.rgb(121, 85, 72)) { usunOstatnieZdjecie() }, lp(1f))
-        w2.addView(przycisk("Usuń wszystkie", szary) { usunWszystkieZdjecia() }, lp(1f, 6))
-        ekranZdj.addView(w2)
-        pokazLicznikZdjec()
+        val przew = ScrollView(this)
+        listaZdj = LinearLayout(this)
+        listaZdj.orientation = LinearLayout.VERTICAL
+        przew.addView(listaZdj)
+        ekranZdj.addView(przew, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        ekranZdj.addView(przycisk("Usuń wszystkie z aplikacji", szary) { usunWszystkieZdjecia() },
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)))
+        pokazListeZdjec()
     }
 
     private fun pokazZdjecia() {
         zatrzymajKamere()
         tryb = "ZDJECIA"
-        podgladAkt = podgladZdj
         setContentView(ekranZdj)
         tSprawaZdj.text = if (sprawaZdj.isNotBlank()) sprawaZdj else "Zdjęcia trafią do sprawy otwartej w komputerze"
-        pokazLicznikZdjec()
-        wlaczKamere()
+        pokazListeZdjec()
         pokazStan()
     }
 
@@ -608,66 +609,133 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private fun pokazLicznikZdjec() {
         if (!::tStanZdj.isInitialized) return
         val n = plikiZdjec().size
-        tStanZdj.text = if (n == 0) "W telefonie nie ma zdjęć" else "W telefonie: $n zdj. - czekają na komputer"
+        tStanZdj.text = if (n == 0) "Brak zdjęć - wybierz je z galerii" else "Wybrane: $n zdj. - czekają na komputer (dotknij zdjęcia = podgląd)"
         tStanZdj.setTextColor(if (n == 0) szary else pomaranczowy)
     }
 
-    private fun zrobZdjecie() {
-        val zdj = przechwyt ?: run {
-            Toast.makeText(this, "Aparat jeszcze się nie uruchomił", Toast.LENGTH_SHORT).show()
-            return
+    // obraz z galerii / pliku: najdłuższy bok do max px, obrót wg EXIF
+    private fun wczytajObraz(otworz: () -> java.io.InputStream?, max: Int): Bitmap? {
+        val o = BitmapFactory.Options()
+        o.inJustDecodeBounds = true
+        otworz()?.use { BitmapFactory.decodeStream(it, null, o) }
+        if (o.outWidth <= 0 || o.outHeight <= 0) return null
+        var sk = 1
+        while (maxOf(o.outWidth, o.outHeight) / (sk * 2) >= max) sk *= 2
+        val o2 = BitmapFactory.Options()
+        o2.inSampleSize = sk
+        var bmp = otworz()?.use { BitmapFactory.decodeStream(it, null, o2) } ?: return null
+        val dl = maxOf(bmp.width, bmp.height)
+        if (dl > max) {
+            val k = max.toFloat() / dl
+            bmp = Bitmap.createScaledBitmap(bmp, (bmp.width * k).toInt(), (bmp.height * k).toInt(), true)
         }
-        bZrob.isEnabled = false
-        bZrob.text = "Zapisuję ..."
-        val opis = eOpisZdj.text.toString().trim()
-        zdj.takePicture(watekKamery, object : ImageCapture.OnImageCapturedCallback() {
-            override fun onCaptureSuccess(obraz: ImageProxy) {
-                var blad: String? = null
+        val orient = try {
+            otworz()?.use { ExifInterface(it).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL) }
+                ?: ExifInterface.ORIENTATION_NORMAL
+        } catch (e: Exception) {
+            ExifInterface.ORIENTATION_NORMAL
+        }
+        val obrot = when (orient) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+            ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+            ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+            else -> 0f
+        }
+        if (obrot != 0f) {
+            val m = Matrix()
+            m.postRotate(obrot)
+            bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+        }
+        return bmp
+    }
+
+    private fun importujZdjecia(uris: List<Uri>) {
+        bGaleria.isEnabled = false
+        tStanZdj.text = "Kopiuję zdjęcia (${uris.size}) ..."
+        tStanZdj.setTextColor(niebieski)
+        watekKamery.execute {
+            var ok = 0
+            for (u in uris) {
                 try {
-                    val obrot = obraz.imageInfo.rotationDegrees
-                    var bmp = obraz.toBitmap()
-                    obraz.close()
-                    // najdłuższy bok 1600 px - wystarczy do protokołu, mały plik
-                    val maks = 1600
-                    val dl = maxOf(bmp.width, bmp.height)
-                    if (dl > maks) {
-                        val sk = maks.toFloat() / dl
-                        bmp = Bitmap.createScaledBitmap(bmp, (bmp.width * sk).toInt(), (bmp.height * sk).toInt(), true)
-                    }
-                    if (obrot != 0) {
-                        val m = Matrix()
-                        m.postRotate(obrot.toFloat())
-                        bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
-                    }
+                    val bmp = wczytajObraz({ contentResolver.openInputStream(u) }, 1600) ?: continue
                     val nr = (plikiZdjec().maxOfOrNull { it.first } ?: 0) + 1
                     FileOutputStream(File(folderZdj, "zdj_$nr.jpg")).use { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
-                    if (opis.isNotEmpty()) File(folderZdj, "zdj_$nr.txt").writeText(opis, Charsets.UTF_8)
+                    ok++
                 } catch (e: Exception) {
-                    blad = e.message ?: "błąd"
-                    try { obraz.close() } catch (x: Exception) { }
-                }
-                runOnUiThread {
-                    bZrob.isEnabled = true
-                    bZrob.text = "ZRÓB ZDJĘCIE"
-                    if (blad == null) {
-                        eOpisZdj.setText("")
-                        ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
-                        bZrob.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-                    } else {
-                        Toast.makeText(this@MainActivity, "Nie zapisano zdjęcia: $blad", Toast.LENGTH_LONG).show()
-                    }
-                    pokazLicznikZdjec()
                 }
             }
+            runOnUiThread {
+                bGaleria.isEnabled = true
+                pokazListeZdjec()
+                if (ok < uris.size) Toast.makeText(this, "Nie udało się skopiować: ${uris.size - ok}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
 
-            override fun onError(e: ImageCaptureException) {
-                runOnUiThread {
-                    bZrob.isEnabled = true
-                    bZrob.text = "ZRÓB ZDJĘCIE"
-                    Toast.makeText(this@MainActivity, "Błąd zdjęcia: ${e.message}", Toast.LENGTH_LONG).show()
-                }
+    private fun pokazListeZdjec() {
+        if (!::listaZdj.isInitialized) return
+        listaZdj.removeAllViews()
+        for ((nr, plik) in plikiZdjec()) {
+            val w = wiersz()
+            w.setPadding(0, dp(6), 0, dp(6))
+            val iv = ImageView(this)
+            iv.scaleType = ImageView.ScaleType.CENTER_CROP
+            try {
+                iv.setImageBitmap(wczytajObraz({ plik.inputStream() }, 300))
+            } catch (e: Exception) {
             }
-        })
+            iv.setOnClickListener { podgladZdjecia(plik) }
+            w.addView(iv, LinearLayout.LayoutParams(dp(110), dp(110)))
+
+            val kol = LinearLayout(this)
+            kol.orientation = LinearLayout.VERTICAL
+            kol.setPadding(dp(8), 0, 0, 0)
+            val opis = EditText(this)
+            opis.hint = "Opis zdjęcia (co widać)"
+            opis.setText(opisZdjecia(nr))
+            opis.textSize = 15f
+            opis.minLines = 2
+            opis.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            opis.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(a: CharSequence?, b: Int, c: Int, d: Int) {}
+                override fun onTextChanged(a: CharSequence?, b: Int, c: Int, d: Int) {}
+                override fun afterTextChanged(e: Editable?) {
+                    try {
+                        File(folderZdj, "zdj_$nr.txt").writeText(e?.toString()?.trim() ?: "", Charsets.UTF_8)
+                    } catch (x: Exception) {
+                    }
+                }
+            })
+            kol.addView(opis, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            val wb = wiersz()
+            wb.addView(przycisk("Podgląd", niebieski, 13f) { podgladZdjecia(plik) }, lp(1f))
+            wb.addView(przycisk("Usuń", Color.rgb(121, 85, 72), 13f) {
+                AlertDialog.Builder(this)
+                    .setTitle("Usunąć to zdjęcie z aplikacji?")
+                    .setMessage("Zdjęcie w galerii telefonu zostaje.")
+                    .setPositiveButton("Usuń") { _, _ -> usunZdjecie(nr); pokazListeZdjec() }
+                    .setNegativeButton("Nie", null)
+                    .show()
+            }, lp(1f, 6))
+            kol.addView(wb)
+            w.addView(kol, lp(1f))
+            listaZdj.addView(w)
+        }
+        pokazLicznikZdjec()
+    }
+
+    private fun podgladZdjecia(plik: File) {
+        val iv = ImageView(this)
+        iv.adjustViewBounds = true
+        iv.scaleType = ImageView.ScaleType.FIT_CENTER
+        iv.setBackgroundColor(Color.BLACK)
+        try {
+            iv.setImageBitmap(BitmapFactory.decodeFile(plik.absolutePath))
+        } catch (e: Exception) {
+        }
+        val d = AlertDialog.Builder(this).setView(iv).setPositiveButton("Zamknij", null).create()
+        iv.setOnClickListener { d.dismiss() }
+        d.show()
     }
 
     private fun usunZdjecie(nr: Int) {
@@ -675,23 +743,13 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         File(folderZdj, "zdj_$nr.txt").delete()
     }
 
-    private fun usunOstatnieZdjecie() {
-        val ost = plikiZdjec().lastOrNull() ?: return
-        AlertDialog.Builder(this)
-            .setTitle("Usunąć ostatnie zdjęcie?")
-            .setMessage(opisZdjecia(ost.first).ifBlank { "zdjęcie nr ${ost.first}" })
-            .setPositiveButton("Usuń") { _, _ -> usunZdjecie(ost.first); pokazLicznikZdjec() }
-            .setNegativeButton("Nie", null)
-            .show()
-    }
-
     private fun usunWszystkieZdjecia() {
         val n = plikiZdjec().size
         if (n == 0) return
         AlertDialog.Builder(this)
-            .setTitle("Usunąć wszystkie zdjęcia ($n)?")
-            .setMessage("Zdjęcia, których komputer jeszcze nie pobrał, przepadną.")
-            .setPositiveButton("Usuń") { _, _ -> plikiZdjec().forEach { usunZdjecie(it.first) }; pokazLicznikZdjec() }
+            .setTitle("Usunąć wszystkie zdjęcia z aplikacji ($n)?")
+            .setMessage("Komputer ich już nie pobierze. Zdjęcia w galerii telefonu zostają.")
+            .setPositiveButton("Usuń") { _, _ -> plikiZdjec().forEach { usunZdjecie(it.first) }; pokazListeZdjec() }
             .setNegativeButton("Nie", null)
             .show()
     }
@@ -728,7 +786,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             usunZdjecie(nr)
         }
         runOnUiThread {
-            pokazLicznikZdjec()
+            pokazListeZdjec()
             if (tryb == "ZDJECIA") {
                 tStanZdj.text = "\u2714 Komputer pobrał zdjęcia - " + tStanZdj.text
                 ton?.startTone(ToneGenerator.TONE_PROP_BEEP2, 300)
@@ -765,16 +823,6 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                 if (tryb == "MENU") return@addListener
                 val preview = Preview.Builder().build()
                 preview.setSurfaceProvider((podgladAkt ?: podgladWyd).surfaceProvider)
-                if (tryb == "ZDJECIA") {
-                    val zdj = ImageCapture.Builder()
-                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                        .setFlashMode(ImageCapture.FLASH_MODE_AUTO)
-                        .build()
-                    przechwyt = zdj
-                    dostawca.unbindAll()
-                    kamera = dostawca.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, zdj)
-                    return@addListener
-                }
                 val analiza = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
@@ -782,13 +830,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                 dostawca.unbindAll()
                 kamera = dostawca.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analiza)
             } catch (e: Exception) {
-                if (tryb == "ZDJECIA") {
-                    tStanZdj.text = "Błąd aparatu: ${e.message}"
-                    tStanZdj.setTextColor(czerwony)
-                } else {
-                    tKod.text = "Błąd aparatu: ${e.message}"
-                    tKod.setTextColor(czerwony)
-                }
+                tKod.text = "Błąd aparatu: ${e.message}"
+                tKod.setTextColor(czerwony)
             }
         }, ContextCompat.getMainExecutor(this))
     }
@@ -799,7 +842,6 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         } catch (e: Exception) {
         }
         kamera = null
-        przechwyt = null
         latarka = false
         if (::bLatarka.isInitialized) bLatarka.text = "Latarka"
     }
