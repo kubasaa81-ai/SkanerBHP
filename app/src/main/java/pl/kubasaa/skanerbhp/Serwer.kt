@@ -15,6 +15,10 @@ import java.util.concurrent.Executors
  *   POST /wynik           -> "N|kolor|tekst" - wynik sprawdzenia skanu w komputerze (1 OK, 2 błąd, 3 uwaga)
  *   POST /koniec          -> wydanie zapisane - lista zamknięta
  *   POST /katalog         -> katalog pozycji magazynu (Dostawa / Inwentura / Kody)
+ *   GET  /zdjecia         -> zdjęcia czekające w telefonie (Zdjęcia - wypadki), linie "nr|opis"
+ *   GET  /zdjecie?nr=N    -> plik JPG zdjęcia N
+ *   POST /odebrane        -> "nr,nr,..." komputer zapisał zdjęcia - telefon je kasuje
+ *   POST /zdjecia_sprawa  -> opis sprawy (np. "Wypadek nr 4/2026") - pokazuje się na ekranie Zdjęcia
  */
 class Serwer(private val obsluga: Obsluga) {
 
@@ -26,6 +30,10 @@ class Serwer(private val obsluga: Obsluga) {
         fun koniec(tekst: String)
         fun komputer(adres: String)
         fun katalog(tekst: String)
+        fun zdjecia(): String
+        fun zdjecie(nr: Int): ByteArray?
+        fun odebrane(tekst: String)
+        fun zdjeciaSprawa(tekst: String)
     }
 
     @Volatile private var gniazdo: ServerSocket? = null
@@ -70,6 +78,15 @@ class Serwer(private val obsluga: Obsluga) {
         return b.toString("UTF-8")
     }
 
+    private fun wyslij(k: Socket, b: ByteArray, typ: String, status: String) {
+        val nag = "HTTP/1.1 $status\r\nContent-Type: $typ\r\n" +
+                "Content-Length: ${b.size}\r\nConnection: close\r\nCache-Control: no-cache\r\n\r\n"
+        val wy = k.getOutputStream()
+        wy.write(nag.toByteArray(Charsets.US_ASCII))
+        wy.write(b)
+        wy.flush()
+    }
+
     private fun obsluz(k: Socket) {
         try {
             k.soTimeout = 5000
@@ -103,6 +120,17 @@ class Serwer(private val obsluga: Obsluga) {
             val parametry = adres.substringAfter('?', "")
             obsluga.komputer(k.inetAddress.hostAddress ?: "")
 
+            val nrParam = parametry.split("&").firstOrNull { it.startsWith("nr=") }
+                ?.substringAfter("=")?.toIntOrNull() ?: -1
+            if (sciezka == "/zdjecie") {
+                val jpg = obsluga.zdjecie(nrParam)
+                if (jpg != null) {
+                    wyslij(k, jpg, "image/jpeg", "200 OK")
+                } else {
+                    wyslij(k, "brak".toByteArray(Charsets.UTF_8), "text/plain; charset=utf-8", "404 Not Found")
+                }
+                return
+            }
             val odp: String = when {
                 sciezka == "/ping" -> obsluga.ping()
                 sciezka == "/lista" && metoda == "POST" -> { obsluga.lista(cialo); "OK" }
@@ -114,16 +142,13 @@ class Serwer(private val obsluga: Obsluga) {
                 sciezka == "/wynik" && metoda == "POST" -> { obsluga.wynik(cialo); "OK" }
                 sciezka == "/koniec" && metoda == "POST" -> { obsluga.koniec(cialo); "OK" }
                 sciezka == "/katalog" && metoda == "POST" -> { obsluga.katalog(cialo); "OK" }
+                sciezka == "/zdjecia" -> obsluga.zdjecia()
+                sciezka == "/odebrane" && metoda == "POST" -> { obsluga.odebrane(cialo); "OK" }
+                sciezka == "/zdjecia_sprawa" && metoda == "POST" -> { obsluga.zdjeciaSprawa(cialo); "OK" }
                 sciezka == "/" -> "Skaner BHP - połączenie działa ✔"
                 else -> "?"
             }
-            val b = odp.toByteArray(Charsets.UTF_8)
-            val nag = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n" +
-                    "Content-Length: ${b.size}\r\nConnection: close\r\nCache-Control: no-cache\r\n\r\n"
-            val wy = k.getOutputStream()
-            wy.write(nag.toByteArray(Charsets.US_ASCII))
-            wy.write(b)
-            wy.flush()
+            wyslij(k, odp.toByteArray(Charsets.UTF_8), "text/plain; charset=utf-8", "200 OK")
         } catch (e: Exception) {
         } finally {
             try {

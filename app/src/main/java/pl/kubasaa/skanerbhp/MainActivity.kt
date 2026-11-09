@@ -38,6 +38,12 @@ import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
+import android.graphics.Bitmap
+import android.graphics.Matrix
+import java.io.File
+import java.io.FileOutputStream
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -60,6 +66,8 @@ import kotlin.system.exitProcess
  * Wydanie: komputer wysyła listę "co wydać", aparat czyta kody, komputer pobiera skany i odsyła wynik.
  * Dostawa / Inwentura / Kody: katalog z komputera (warianty, rozmiary, stany, kody producenta) -
  *   znany kod = od razu pozycja, nieznany = wybór z listy i przypisanie kodu; polecenia @DOST / @INW / @KOD.
+ * Zdjęcia (wypadki): zdjęcia z miejsca wypadku z opisem - zapisane tylko w aplikacji (nie w galerii),
+ *   komputer pobiera je do protokołu oględzin (Oględziny -> "Z telefonu") i wtedy telefon je kasuje.
  */
 class MainActivity : AppCompatActivity(), Serwer.Obsluga {
 
@@ -72,7 +80,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private lateinit var ekranStart: LinearLayout
     private lateinit var ekranWydanie: LinearLayout
     private lateinit var ekranMag: LinearLayout
-    @Volatile private var tryb = "MENU"            // MENU / WYDANIE / DOSTAWA / INWENTURA / KODY
+    private lateinit var ekranZdj: LinearLayout
+    @Volatile private var tryb = "MENU"            // MENU / WYDANIE / DOSTAWA / INWENTURA / KODY / ZDJECIA
     private val naWydaniu: Boolean get() = tryb == "WYDANIE"
 
     // magazyn (dostawa / inwentura / kody)
@@ -94,6 +103,17 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private class Kat(val w: Int, val r: Int, val asort: String, val wariant: String, val rozm: String, var stan: Int, val kody: MutableList<String>)
     private var katalog: List<Kat> = emptyList()
     @Volatile private var katWersja = "0"
+
+    // zdjęcia (wypadki): pliki w katalogu aplikacji  zdjecia/zdj_<nr>.jpg  +  zdj_<nr>.txt (opis)
+    private lateinit var podgladZdj: PreviewView
+    private lateinit var tSprawaZdj: TextView
+    private lateinit var tKomputerZdj: TextView
+    private lateinit var eOpisZdj: EditText
+    private lateinit var bZrob: Button
+    private lateinit var tStanZdj: TextView
+    private var przechwyt: ImageCapture? = null
+    @Volatile private var sprawaZdj = ""
+    private val folderZdj: File by lazy { File(filesDir, "zdjecia").apply { mkdirs() } }
 
     // start
     private lateinit var tSiec: TextView
@@ -183,6 +203,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         zbudujStart()
         zbudujWydanie()
         zbudujMagazyn()
+        zbudujZdjecia()
         pokazStart()
         val blad = serwer.start(8080)
         if (blad != null) Toast.makeText(this, "Serwer: $blad", Toast.LENGTH_LONG).show()
@@ -256,7 +277,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         ekranStart.setBackgroundColor(Color.rgb(245, 248, 252))
 
         ekranStart.addView(tekst("Skaner BHP", 30f, Color.rgb(0, 105, 92), true))
-        ekranStart.addView(tekst("Odzież i ŚOI - Program BHP", 15f, szary))
+        ekranStart.addView(tekst("Program BHP - odzież i ŚOI, wypadki", 15f, szary))
 
         tSiec = tekst("", 15f, szary, true)
         tSiec.setPadding(0, dp(16), 0, 0)
@@ -272,6 +293,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         ekranStart.addView(przycisk("Dostawa", Color.rgb(93, 64, 55), 22f) { pokazMagazyn("DOSTAWA") }, lpPelny(12))
         ekranStart.addView(przycisk("Inwentura", Color.rgb(2, 119, 189), 22f) { pokazMagazyn("INWENTURA") }, lpPelny(12))
         ekranStart.addView(przycisk("Kody producenta", Color.rgb(239, 108, 0), 20f) { pokazMagazyn("KODY") }, lpPelny(12))
+        ekranStart.addView(przycisk("Zdjęcia - wypadki", Color.rgb(198, 40, 40), 20f) { pokazZdjecia() }, lpPelny(12))
 
         val odstep = View(this)
         ekranStart.addView(odstep, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -418,6 +440,14 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             tKomputer.text = if (vpn) k else "GlobalProtect wyłączony - wróć do Menu i włącz"
             tKomputer.setTextColor(if (vpn) kolor else czerwony)
         }
+        if (::tKomputerZdj.isInitialized) {
+            tKomputerZdj.text = when {
+                !vpn -> "GlobalProtect wyłączony - zdjęcia czekają w telefonie, komputer pobierze je później"
+                komputerWidziany() -> "\u2714 Komputer połączony ($adresKomputera)"
+                else -> "Komputer pobierze zdjęcia: Oględziny -> \"Z telefonu\""
+            }
+            tKomputerZdj.setTextColor(if (vpn && komputerWidziany()) zielony else szary)
+        }
         if (::tKomputerMag.isInitialized) {
             tKomputerMag.text = when {
                 !vpn -> "GlobalProtect wyłączony - wróć do Menu i włącz"
@@ -508,6 +538,212 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     }
 
     // ------------------------------------------------------------------
+    //  ZDJĘCIA (wypadki)
+    // ------------------------------------------------------------------
+    private fun zbudujZdjecia() {
+        ekranZdj = LinearLayout(this)
+        ekranZdj.orientation = LinearLayout.VERTICAL
+        ekranZdj.setPadding(dp(12), dp(12), dp(12), dp(12))
+        ekranZdj.setBackgroundColor(Color.rgb(245, 248, 252))
+
+        val w1 = wiersz()
+        w1.addView(przycisk("← Menu", szary) { pokazStart() })
+        w1.addView(tekst("  Zdjęcia - wypadki", 22f, czerwony, true), lp(1f))
+        ekranZdj.addView(w1)
+
+        tSprawaZdj = tekst("", 15f, Color.rgb(173, 20, 87), true)
+        tSprawaZdj.setPadding(0, dp(6), 0, 0)
+        ekranZdj.addView(tSprawaZdj)
+        tKomputerZdj = tekst("", 13f, szary)
+        tKomputerZdj.setPadding(0, dp(2), 0, dp(6))
+        ekranZdj.addView(tKomputerZdj)
+
+        podgladZdj = PreviewView(this)
+        podgladZdj.scaleType = PreviewView.ScaleType.FIT_CENTER
+        ekranZdj.addView(podgladZdj, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        eOpisZdj = EditText(this)
+        eOpisZdj.hint = "Opis zdjęcia (np. krawędź stopnia, na którym ...)"
+        eOpisZdj.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        ekranZdj.addView(eOpisZdj, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        bZrob = przycisk("ZRÓB ZDJĘCIE", czerwony, 22f) { zrobZdjecie() }
+        ekranZdj.addView(bZrob, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(64)))
+
+        tStanZdj = tekst("", 15f, szary, true)
+        tStanZdj.gravity = Gravity.CENTER
+        tStanZdj.setPadding(0, dp(6), 0, dp(6))
+        ekranZdj.addView(tStanZdj)
+
+        val w2 = wiersz()
+        w2.addView(przycisk("Usuń ostatnie", Color.rgb(121, 85, 72)) { usunOstatnieZdjecie() }, lp(1f))
+        w2.addView(przycisk("Usuń wszystkie", szary) { usunWszystkieZdjecia() }, lp(1f, 6))
+        ekranZdj.addView(w2)
+        pokazLicznikZdjec()
+    }
+
+    private fun pokazZdjecia() {
+        zatrzymajKamere()
+        tryb = "ZDJECIA"
+        podgladAkt = podgladZdj
+        setContentView(ekranZdj)
+        tSprawaZdj.text = if (sprawaZdj.isNotBlank()) sprawaZdj else "Zdjęcia trafią do sprawy otwartej w komputerze"
+        pokazLicznikZdjec()
+        wlaczKamere()
+        pokazStan()
+    }
+
+    private fun plikiZdjec(): List<Pair<Int, File>> {
+        val f = folderZdj.listFiles() ?: return emptyList()
+        return f.filter { it.name.startsWith("zdj_") && it.name.endsWith(".jpg") }
+            .mapNotNull { pl -> pl.name.removePrefix("zdj_").removeSuffix(".jpg").toIntOrNull()?.let { Pair(it, pl) } }
+            .sortedBy { it.first }
+    }
+
+    private fun opisZdjecia(nr: Int): String {
+        val t = File(folderZdj, "zdj_$nr.txt")
+        return if (t.exists()) t.readText(Charsets.UTF_8) else ""
+    }
+
+    private fun pokazLicznikZdjec() {
+        if (!::tStanZdj.isInitialized) return
+        val n = plikiZdjec().size
+        tStanZdj.text = if (n == 0) "W telefonie nie ma zdjęć" else "W telefonie: $n zdj. - czekają na komputer"
+        tStanZdj.setTextColor(if (n == 0) szary else pomaranczowy)
+    }
+
+    private fun zrobZdjecie() {
+        val zdj = przechwyt ?: run {
+            Toast.makeText(this, "Aparat jeszcze się nie uruchomił", Toast.LENGTH_SHORT).show()
+            return
+        }
+        bZrob.isEnabled = false
+        bZrob.text = "Zapisuję ..."
+        val opis = eOpisZdj.text.toString().trim()
+        zdj.takePicture(watekKamery, object : ImageCapture.OnImageCapturedCallback() {
+            override fun onCaptureSuccess(obraz: ImageProxy) {
+                var blad: String? = null
+                try {
+                    val obrot = obraz.imageInfo.rotationDegrees
+                    var bmp = obraz.toBitmap()
+                    obraz.close()
+                    // najdłuższy bok 1600 px - wystarczy do protokołu, mały plik
+                    val maks = 1600
+                    val dl = maxOf(bmp.width, bmp.height)
+                    if (dl > maks) {
+                        val sk = maks.toFloat() / dl
+                        bmp = Bitmap.createScaledBitmap(bmp, (bmp.width * sk).toInt(), (bmp.height * sk).toInt(), true)
+                    }
+                    if (obrot != 0) {
+                        val m = Matrix()
+                        m.postRotate(obrot.toFloat())
+                        bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+                    }
+                    val nr = (plikiZdjec().maxOfOrNull { it.first } ?: 0) + 1
+                    FileOutputStream(File(folderZdj, "zdj_$nr.jpg")).use { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+                    if (opis.isNotEmpty()) File(folderZdj, "zdj_$nr.txt").writeText(opis, Charsets.UTF_8)
+                } catch (e: Exception) {
+                    blad = e.message ?: "błąd"
+                    try { obraz.close() } catch (x: Exception) { }
+                }
+                runOnUiThread {
+                    bZrob.isEnabled = true
+                    bZrob.text = "ZRÓB ZDJĘCIE"
+                    if (blad == null) {
+                        eOpisZdj.setText("")
+                        ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
+                        bZrob.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                    } else {
+                        Toast.makeText(this@MainActivity, "Nie zapisano zdjęcia: $blad", Toast.LENGTH_LONG).show()
+                    }
+                    pokazLicznikZdjec()
+                }
+            }
+
+            override fun onError(e: ImageCaptureException) {
+                runOnUiThread {
+                    bZrob.isEnabled = true
+                    bZrob.text = "ZRÓB ZDJĘCIE"
+                    Toast.makeText(this@MainActivity, "Błąd zdjęcia: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        })
+    }
+
+    private fun usunZdjecie(nr: Int) {
+        File(folderZdj, "zdj_$nr.jpg").delete()
+        File(folderZdj, "zdj_$nr.txt").delete()
+    }
+
+    private fun usunOstatnieZdjecie() {
+        val ost = plikiZdjec().lastOrNull() ?: return
+        AlertDialog.Builder(this)
+            .setTitle("Usunąć ostatnie zdjęcie?")
+            .setMessage(opisZdjecia(ost.first).ifBlank { "zdjęcie nr ${ost.first}" })
+            .setPositiveButton("Usuń") { _, _ -> usunZdjecie(ost.first); pokazLicznikZdjec() }
+            .setNegativeButton("Nie", null)
+            .show()
+    }
+
+    private fun usunWszystkieZdjecia() {
+        val n = plikiZdjec().size
+        if (n == 0) return
+        AlertDialog.Builder(this)
+            .setTitle("Usunąć wszystkie zdjęcia ($n)?")
+            .setMessage("Zdjęcia, których komputer jeszcze nie pobrał, przepadną.")
+            .setPositiveButton("Usuń") { _, _ -> plikiZdjec().forEach { usunZdjecie(it.first) }; pokazLicznikZdjec() }
+            .setNegativeButton("Nie", null)
+            .show()
+    }
+
+    // polskie litery -> ~a ~c ... (jak komputer), | i nowa linia -> spacja
+    private fun naKomputer(s: String): String {
+        val z = "acelnosxzACELNOSXZ"
+        val na = "ąćęłńóśźżĄĆĘŁŃÓŚŹŻ"
+        val b = StringBuilder()
+        for (c in s) {
+            val k = na.indexOf(c)
+            when {
+                k >= 0 -> b.append('~').append(z[k])
+                c == '|' || c == '\n' || c == '\r' -> b.append(' ')
+                else -> b.append(c)
+            }
+        }
+        return b.toString()
+    }
+
+    override fun zdjecia(): String {
+        val l = plikiZdjec()
+        return "ZDJ|" + l.size + l.joinToString("") { "\n${it.first}|" + naKomputer(opisZdjecia(it.first)) }
+    }
+
+    override fun zdjecie(nr: Int): ByteArray? {
+        val f = File(folderZdj, "zdj_$nr.jpg")
+        return if (f.exists()) f.readBytes() else null
+    }
+
+    override fun odebrane(tekst: String) {
+        for (t in tekst.split(",")) {
+            val nr = t.trim().toIntOrNull() ?: continue
+            usunZdjecie(nr)
+        }
+        runOnUiThread {
+            pokazLicznikZdjec()
+            if (tryb == "ZDJECIA") {
+                tStanZdj.text = "\u2714 Komputer pobrał zdjęcia - " + tStanZdj.text
+                ton?.startTone(ToneGenerator.TONE_PROP_BEEP2, 300)
+            }
+        }
+    }
+
+    override fun zdjeciaSprawa(tekst: String) {
+        sprawaZdj = polskie(tekst.trim())
+        runOnUiThread {
+            if (::tSprawaZdj.isInitialized && sprawaZdj.isNotBlank()) tSprawaZdj.text = sprawaZdj
+        }
+    }
+
+    // ------------------------------------------------------------------
     //  APARAT
     // ------------------------------------------------------------------
     private fun uruchomKamere() {
@@ -529,6 +765,16 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                 if (tryb == "MENU") return@addListener
                 val preview = Preview.Builder().build()
                 preview.setSurfaceProvider((podgladAkt ?: podgladWyd).surfaceProvider)
+                if (tryb == "ZDJECIA") {
+                    val zdj = ImageCapture.Builder()
+                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                        .setFlashMode(ImageCapture.FLASH_MODE_AUTO)
+                        .build()
+                    przechwyt = zdj
+                    dostawca.unbindAll()
+                    kamera = dostawca.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, zdj)
+                    return@addListener
+                }
                 val analiza = ImageAnalysis.Builder()
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
@@ -536,8 +782,13 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                 dostawca.unbindAll()
                 kamera = dostawca.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analiza)
             } catch (e: Exception) {
-                tKod.text = "Błąd aparatu: ${e.message}"
-                tKod.setTextColor(czerwony)
+                if (tryb == "ZDJECIA") {
+                    tStanZdj.text = "Błąd aparatu: ${e.message}"
+                    tStanZdj.setTextColor(czerwony)
+                } else {
+                    tKod.text = "Błąd aparatu: ${e.message}"
+                    tKod.setTextColor(czerwony)
+                }
             }
         }, ContextCompat.getMainExecutor(this))
     }
@@ -548,6 +799,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         } catch (e: Exception) {
         }
         kamera = null
+        przechwyt = null
         latarka = false
         if (::bLatarka.isInitialized) bLatarka.text = "Latarka"
     }
