@@ -19,6 +19,8 @@ import java.util.concurrent.Executors
  *   GET  /zdjecie?nr=N    -> plik JPG zdjęcia N
  *   POST /odebrane        -> "nr,nr,..." komputer zapisał zdjęcia - telefon je kasuje
  *   POST /zdjecia_sprawa  -> opis sprawy (np. "Wypadek nr 4/2026") - pokazuje się na ekranie Zdjęcia
+ *   POST /sms             -> "numer\ntreść" - telefon wysyła SMS (np. hasło do pliku z danymi osobowymi);
+ *                            odpowiedź: OK | BRAK_UPRAWNIEN | BLAD|opis
  */
 class Serwer(private val obsluga: Obsluga) {
 
@@ -34,6 +36,7 @@ class Serwer(private val obsluga: Obsluga) {
         fun zdjecie(nr: Int): ByteArray?
         fun odebrane(tekst: String)
         fun zdjeciaSprawa(tekst: String)
+        fun sms(tekst: String): String
     }
 
     @Volatile private var gniazdo: ServerSocket? = null
@@ -145,6 +148,7 @@ class Serwer(private val obsluga: Obsluga) {
                 sciezka == "/zdjecia" -> obsluga.zdjecia()
                 sciezka == "/odebrane" && metoda == "POST" -> { obsluga.odebrane(cialo); "OK" }
                 sciezka == "/zdjecia_sprawa" && metoda == "POST" -> { obsluga.zdjeciaSprawa(cialo); "OK" }
+                sciezka == "/sms" && metoda == "POST" -> obsluga.sms(cialo)
                 sciezka == "/" -> "Skaner BHP - połączenie działa ✔"
                 else -> "?"
             }

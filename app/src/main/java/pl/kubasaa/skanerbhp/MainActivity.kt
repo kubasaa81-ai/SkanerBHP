@@ -11,7 +11,9 @@ import android.media.ToneGenerator
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.telephony.SmsManager
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -190,6 +192,11 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         }
     }
 
+    // SMS z komputera (np. hasło do pliku z danymi osobowymi) - zgoda pytana przy starcie aplikacji
+    private val prosbaSms = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (!ok) Toast.makeText(this, "Bez zgody na SMS program BHP nie wyśle hasła z telefonu", Toast.LENGTH_LONG).show()
+    }
+
     private val odswiezanie = object : Runnable {
         override fun run() {
             pokazStan()
@@ -211,6 +218,9 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         zbudujMagazyn()
         zbudujZdjecia()
         pokazStart()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
+            prosbaSms.launch(Manifest.permission.SEND_SMS)
+        }
         val blad = serwer.start(8080)
         if (blad != null) Toast.makeText(this, "Serwer: $blad", Toast.LENGTH_LONG).show()
         onBackPressedDispatcher.addCallback(this) {
@@ -791,6 +801,33 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                 tStanZdj.text = "\u2714 Komputer pobrał zdjęcia - " + tStanZdj.text
                 ton?.startTone(ToneGenerator.TONE_PROP_BEEP2, 300)
             }
+        }
+    }
+
+    // POST /sms: "numer\ntreść" (polskie litery jako ~a ...).  Numer 9 cyfr -> +48.
+    override fun sms(tekst: String): String {
+        val linie = tekst.replace("\r", "").split("\n", limit = 2)
+        if (linie.size < 2) return "BLAD|brak numeru albo treści"
+        var numer = linie[0].filter { it.isDigit() || it == '+' }
+        if (numer.length == 9 && !numer.startsWith("+")) numer = "+48$numer"
+        if (numer.length < 9) return "BLAD|zły numer: ${linie[0]}"
+        val tresc = polskie(linie[1].trim())
+        if (tresc.isEmpty()) return "BLAD|pusta treść"
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
+            runOnUiThread { prosbaSms.launch(Manifest.permission.SEND_SMS) }
+            return "BRAK_UPRAWNIEN"
+        }
+        return try {
+            @Suppress("DEPRECATION")
+            val sm: SmsManager = if (Build.VERSION.SDK_INT >= 31) getSystemService(SmsManager::class.java) else SmsManager.getDefault()
+            val czesci = sm.divideMessage(tresc)
+            if (czesci.size > 1) sm.sendMultipartTextMessage(numer, null, czesci, null, null)
+            else sm.sendTextMessage(numer, null, tresc, null, null)
+            val koncowka = numer.takeLast(3)
+            runOnUiThread { Toast.makeText(this, "Wysłano SMS z komputera na numer ...$koncowka", Toast.LENGTH_LONG).show() }
+            "OK"
+        } catch (e: Exception) {
+            "BLAD|" + (e.message ?: "nie udało się wysłać SMS")
         }
     }
 
