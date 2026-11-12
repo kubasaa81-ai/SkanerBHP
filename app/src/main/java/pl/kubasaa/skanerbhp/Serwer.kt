@@ -20,7 +20,7 @@ import java.util.concurrent.Executors
  *   POST /odebrane        -> "nr,nr,..." komputer zapisał zdjęcia - telefon je kasuje
  *   POST /zdjecia_sprawa  -> opis sprawy (np. "Wypadek nr 4/2026") - pokazuje się na ekranie Zdjęcia
  *   POST /sms             -> "numer\ntreść" - telefon wysyła SMS (np. hasło do pliku z danymi osobowymi);
- *                            odpowiedź: OK | BRAK_UPRAWNIEN | BLAD|opis
+ *                            odpowiedź: OK | OTWARTO (bez zgody na SMS: otwarte Wiadomości z gotowym tekstem) | BLAD|opis
  */
 class Serwer(private val obsluga: Obsluga) {
 

@@ -814,8 +814,22 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         val tresc = polskie(linie[1].trim())
         if (tresc.isEmpty()) return "BLAD|pusta treść"
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
-            runOnUiThread { prosbaSms.launch(Manifest.permission.SEND_SMS) }
-            return "BRAK_UPRAWNIEN"
+            // bez zgody (np. "ustawienia z ograniczeniami" dla aplikacji spoza Sklepu Play) -
+            // otwiera Wiadomości z gotowym SMS-em, wystarczy nacisnąć Wyślij
+            return try {
+                val i = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$numer")).putExtra("sms_body", tresc)
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                runOnUiThread {
+                    try {
+                        startActivity(i)
+                    } catch (e: Exception) {
+                        Toast.makeText(this, "Nie udało się otworzyć Wiadomości", Toast.LENGTH_LONG).show()
+                    }
+                }
+                "OTWARTO"
+            } catch (e: Exception) {
+                "BRAK_UPRAWNIEN"
+            }
         }
         return try {
             @Suppress("DEPRECATION")
