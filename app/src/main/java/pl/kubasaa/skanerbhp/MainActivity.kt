@@ -183,6 +183,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     // skan tylko po naciśnięciu SKANUJ (przytrzymanie aparatu nie dodaje kilku sztuk)
     private var uzbrojony = false
     private lateinit var bSkanuj: Button
+    private lateinit var bSkanujMag: Button          // to samo w Dostawie / Inwenturze / Kodach
     private val rozbroj = Runnable { ustawSkanuj(false) }
 
     private val prosbaKamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
@@ -915,17 +916,12 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         if (tryb == "MENU") return
         if (!naWydaniu) {
             if (oknoOtwarte) return
-            val teraz = SystemClock.elapsedRealtime()
-            val kod = kody.firstOrNull { it.format != Barcode.FORMAT_QR_CODE && !it.rawValue.isNullOrEmpty() }?.rawValue
-            if (kod == null) {
-                if (teraz - ostatnioWidziany > 700) kodWKadrze = null
-                return
-            }
-            ostatnioWidziany = teraz
-            if (kod == kodWKadrze) return
-            if (teraz - ostatnioWyslany < 800) return
+            if (!uzbrojony) return                   // jak w Wydaniu: kod tylko po naciśnięciu SKANUJ
+            val kod = kody.firstOrNull { it.format != Barcode.FORMAT_QR_CODE && !it.rawValue.isNullOrEmpty() }?.rawValue ?: return
+            ustawSkanuj(false)                        // jeden kod na jedno naciśnięcie
             kodWKadrze = kod
-            ostatnioWyslany = teraz
+            ostatnioWidziany = SystemClock.elapsedRealtime()
+            ostatnioWyslany = ostatnioWidziany
             kodMagazynu(kod)
             return
         }
@@ -947,12 +943,13 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private fun ustawSkanuj(tak: Boolean) {
         uzbrojony = tak
         handler.removeCallbacks(rozbroj)
-        if (!::bSkanuj.isInitialized) return
-        val tlo = GradientDrawable()
-        tlo.cornerRadius = dp(10).toFloat()
-        tlo.setColor(if (tak) pomaranczowy else niebieski)
-        bSkanuj.background = tlo
-        bSkanuj.text = if (tak) "SKANUJĘ... (dotknij = stop)" else "SKANUJ"
+        for (b in listOfNotNull(if (::bSkanuj.isInitialized) bSkanuj else null, if (::bSkanujMag.isInitialized) bSkanujMag else null)) {
+            val tlo = GradientDrawable()
+            tlo.cornerRadius = dp(10).toFloat()
+            tlo.setColor(if (tak) pomaranczowy else niebieski)
+            b.background = tlo
+            b.text = if (tak) "SKANUJĘ... (dotknij = stop)" else "SKANUJ"
+        }
         if (tak) handler.postDelayed(rozbroj, 6000)
     }
 
@@ -1284,13 +1281,18 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         podgladMag.scaleType = PreviewView.ScaleType.FILL_CENTER
         ekranMag.addView(podgladMag, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 0.8f))
 
-        tPozycja = tekst("Zeskanuj kod kartonu / opakowania", 20f, szary, true)
+        tPozycja = tekst("Naciśnij SKANUJ i skieruj aparat na kod kartonu", 20f, szary, true)
         tPozycja.gravity = Gravity.CENTER
         tPozycja.setPadding(0, dp(8), 0, 0)
         ekranMag.addView(tPozycja)
         tStanProg = tekst("", 15f, szary)
         tStanProg.gravity = Gravity.CENTER
         ekranMag.addView(tStanProg)
+
+        bSkanujMag = przycisk("SKANUJ", niebieski, 22f) { ustawSkanuj(!uzbrojony) }
+        val lpSk = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(60))
+        lpSk.topMargin = dp(6)
+        ekranMag.addView(bSkanujMag, lpSk)
 
         wIlosc = wiersz()
         wIlosc.setPadding(0, dp(6), 0, dp(6))
@@ -1326,6 +1328,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
 
     private fun pokazMagazyn(t: String) {
         zatrzymajKamere()
+        ustawSkanuj(false)
         tryb = t
         podgladAkt = podgladMag
         wybrana = null
@@ -1362,7 +1365,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private fun pokazWybrana() {
         val k = wybrana
         if (k == null) {
-            tPozycja.text = "Zeskanuj kod kartonu / opakowania"
+            tPozycja.text = "Naciśnij SKANUJ i skieruj aparat na kod kartonu"
             tPozycja.setTextColor(szary)
             tStanProg.text = ""
             eIlosc.setText("")
