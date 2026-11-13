@@ -1776,14 +1776,28 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         // wszystkie wydziały (z komputera); stary spis bez nich - te ze spisu
         val wsz = wszystkieWydzChem.ifEmpty { wydzialyChem.map { Pair(it, "") } }
         val kody = wsz.map { it.first }
-        val opisy = wsz.map { if (it.second.isNotBlank()) it.first + "  -  " + it.second else it.first } + "— nie wiem / bez wydziału —"
+        val opisy = wsz.map { if (it.second.isNotBlank()) it.first + "  -  " + it.second else it.first } +
+            "✎ inny wydział - wpiszę kod" + "— nie wiem / bez wydziału —"
         AlertDialog.Builder(this)
             .setTitle("Zdjęć: ${seriaChem.size} - z jakiego wydziału?")
             .setItems(opisy.toTypedArray()) { _, i ->
-                val kod = if (i < kody.size) kody[i] else "-"
                 nSeriiAuto = 0
                 nSeriiRecz = 0
-                przetworzSerie(kod)
+                if (i == kody.size) {
+                    val e = EditText(this)
+                    e.hint = "Kod wydziału, np. DH"
+                    e.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+                    AlertDialog.Builder(this)
+                        .setTitle("Kod wydziału")
+                        .setView(e)
+                        .setPositiveButton("OK") { _, _ ->
+                            val k = e.text.toString().trim()
+                            if (k.isEmpty()) wybierzWydzialSerii() else przetworzSerie(k)
+                        }
+                        .setNegativeButton("Wróć") { _, _ -> wybierzWydzialSerii() }
+                        .setCancelable(false)
+                        .show()
+                } else przetworzSerie(if (i < kody.size) kody[i] else "-")
             }
             .setNegativeButton("Wróć") { _, _ -> pytajSerie() }
             .setCancelable(false)
