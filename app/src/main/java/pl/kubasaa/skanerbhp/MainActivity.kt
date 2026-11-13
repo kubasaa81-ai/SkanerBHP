@@ -1324,7 +1324,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         e.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         AlertDialog.Builder(this)
             .setTitle("Produkt spoza spisu" + if (kod.isNotEmpty()) " - wydział $kod" else "")
-            .setMessage("Komputer zrobi z niego zgłoszenie w \"Nowych produktach\".")
+            .setMessage("Komputer dopisze go od razu do spisu tego wydziału.")
             .setView(e)
             .setPositiveButton("Zdjęcie") { _, _ ->
                 val n = e.text.toString().trim()
@@ -1558,7 +1558,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         e.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         AlertDialog.Builder(this)
             .setTitle("Nowy produkt - wydział $kod")
-            .setMessage("Komputer zrobi zgłoszenie w \"Nowych produktach\"" + if (odczyt.isNotBlank()) " (odczyt z etykiety: $odczyt)." else ".")
+            .setMessage("Komputer dopisze go od razu do spisu tego wydziału" + if (odczyt.isNotBlank()) " (z etykiety: $odczyt - sprawdzisz w Programie BHP)." else ".")
             .setView(e)
             .setPositiveButton("Zapisz") { _, _ ->
                 val n = e.text.toString().trim()
