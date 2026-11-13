@@ -40,7 +40,7 @@
             android:grantUriPermissions="true">
             <meta-data
                 android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resources="@xml/pliki" />
+                android:resource="@xml/pliki" />
         </provider>
     </application>
 </manifest>

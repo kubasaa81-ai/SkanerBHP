@@ -69,7 +69,7 @@ import kotlin.system.exitProcess
 
 /**
  * Skaner BHP - telefon jako skaner dla Programu BHP (Excel) przez sieć firmową (GlobalProtect).
- * Ekran startowy: Wydanie / Dostawa / Inwentura / Kody / Zakończ.
+ * Ekran startowy: Odzież i ŚOI (-> Wydanie / Dostawa / Inwentura / Kody producenta) / Wypadki / Chemia / Zakończ.
  * Wydanie: komputer wysyła listę "co wydać", aparat czyta kody, komputer pobiera skany i odsyła wynik.
  * Dostawa / Inwentura / Kody: katalog z komputera (warianty, rozmiary, stany, kody producenta) -
  *   znany kod = od razu pozycja, nieznany = wybór z listy i przypisanie kodu; polecenia @DOST / @INW / @KOD.
@@ -93,6 +93,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private lateinit var ekranMag: LinearLayout
     private lateinit var ekranZdj: LinearLayout
     private lateinit var ekranChem: LinearLayout
+    private lateinit var ekranOdziez: LinearLayout
+    private lateinit var tKomputerOdz: TextView
     @Volatile private var tryb = "MENU"            // MENU / WYDANIE / DOSTAWA / INWENTURA / KODY / ZDJECIA / CHEMIA
     private val naWydaniu: Boolean get() = tryb == "WYDANIE"
 
@@ -247,6 +249,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             null
         }
         zbudujStart()
+        zbudujOdziez()
         zbudujWydanie()
         zbudujMagazyn()
         zbudujZdjecia()
@@ -258,7 +261,11 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         val blad = serwer.start(8080)
         if (blad != null) Toast.makeText(this, "Serwer: $blad", Toast.LENGTH_LONG).show()
         onBackPressedDispatcher.addCallback(this) {
-            if (tryb != "MENU") pokazStart() else moveTaskToBack(true)
+            when (tryb) {
+                "MENU" -> moveTaskToBack(true)
+                "WYDANIE", "DOSTAWA", "INWENTURA", "KODY" -> pokazOdziez()
+                else -> pokazStart()
+            }
         }
     }
 
@@ -339,16 +346,40 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         bVpn = przycisk("Włącz GlobalProtect", niebieski, 17f) { otworzGlobalProtect() }
         ekranStart.addView(bVpn, lpPelny(4))
 
-        ekranStart.addView(przycisk("Wydanie", Color.rgb(46, 125, 50), 22f) { pokazWydanie() }, lpPelny(18))
-        ekranStart.addView(przycisk("Dostawa", Color.rgb(93, 64, 55), 22f) { pokazMagazyn("DOSTAWA") }, lpPelny(12))
-        ekranStart.addView(przycisk("Inwentura", Color.rgb(2, 119, 189), 22f) { pokazMagazyn("INWENTURA") }, lpPelny(12))
-        ekranStart.addView(przycisk("Kody producenta", Color.rgb(239, 108, 0), 20f) { pokazMagazyn("KODY") }, lpPelny(12))
-        ekranStart.addView(przycisk("Zdjęcia - wypadki", Color.rgb(198, 40, 40), 20f) { pokazZdjecia() }, lpPelny(12))
-        ekranStart.addView(przycisk("Etykiety chemii", Color.rgb(106, 27, 154), 20f) { pokazChemie() }, lpPelny(12))
+        ekranStart.addView(przycisk("Odzież i ŚOI", Color.rgb(46, 125, 50), 24f) { pokazOdziez() }, lpPelny(18))
+        ekranStart.addView(przycisk("Wypadki - zdjęcia", Color.rgb(198, 40, 40), 22f) { pokazZdjecia() }, lpPelny(12))
+        ekranStart.addView(przycisk("Chemia - etykiety", Color.rgb(106, 27, 154), 22f) { pokazChemie() }, lpPelny(12))
 
         val odstep = View(this)
         ekranStart.addView(odstep, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         ekranStart.addView(przycisk("Zakończ", czerwony, 20f) { zakoncz() }, lpPelny(12))
+    }
+
+    // podmenu: Odzież i ŚOI
+    private fun zbudujOdziez() {
+        ekranOdziez = LinearLayout(this)
+        ekranOdziez.orientation = LinearLayout.VERTICAL
+        ekranOdziez.setPadding(dp(18), dp(18), dp(18), dp(18))
+        ekranOdziez.setBackgroundColor(Color.rgb(245, 248, 252))
+        val w1 = wiersz()
+        w1.addView(przycisk("\u2190 Menu", szary) { pokazStart() })
+        w1.addView(tekst("  Odzież i ŚOI", 24f, Color.rgb(46, 125, 50), true), lp(1f))
+        ekranOdziez.addView(w1)
+        tKomputerOdz = tekst("", 14f, szary)
+        tKomputerOdz.setPadding(0, dp(10), 0, dp(4))
+        ekranOdziez.addView(tKomputerOdz)
+        ekranOdziez.addView(przycisk("Wydanie", Color.rgb(46, 125, 50), 22f) { pokazWydanie() }, lpPelny(14))
+        ekranOdziez.addView(przycisk("Dostawa", Color.rgb(93, 64, 55), 22f) { pokazMagazyn("DOSTAWA") }, lpPelny(12))
+        ekranOdziez.addView(przycisk("Inwentura", Color.rgb(2, 119, 189), 22f) { pokazMagazyn("INWENTURA") }, lpPelny(12))
+        ekranOdziez.addView(przycisk("Kody producenta", Color.rgb(239, 108, 0), 20f) { pokazMagazyn("KODY") }, lpPelny(12))
+    }
+
+    private fun pokazOdziez() {
+        tryb = "ODZIEZ"
+        zatrzymajKamere()
+        ustawSkanuj(false)
+        setContentView(ekranOdziez)
+        pokazStan()
     }
 
     private fun zbudujWydanie() {
@@ -358,7 +389,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         ekranWydanie.setBackgroundColor(Color.rgb(245, 248, 252))
 
         val w1 = wiersz()
-        w1.addView(przycisk("← Menu", szary) { pokazStart() })
+        w1.addView(przycisk("← Odzież", szary) { pokazOdziez() })
         val tyt = tekst("  Wydanie", 22f, Color.rgb(46, 125, 50), true)
         w1.addView(tyt, lp(1f))
         w1.addView(przycisk("Zakończ", czerwony) { zakoncz() })
@@ -485,8 +516,12 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             "Komputer jeszcze się nie połączył - Wydanie -> \"Lista na telefon\""
         }
         val kolor = if (komputerWidziany()) zielony else pomaranczowy
-        tKomputerStart.text = k
+        tKomputerStart.text = if (komputerWidziany()) k else if (ostatniKontakt > 0) "Komputer chwilowo nie odpytuje telefonu" else "Komputer jeszcze się nie połączył"
         tKomputerStart.setTextColor(kolor)
+        if (::tKomputerOdz.isInitialized) {
+            tKomputerOdz.text = k
+            tKomputerOdz.setTextColor(kolor)
+        }
         if (::tKomputer.isInitialized) {
             tKomputer.text = if (vpn) k else "GlobalProtect wyłączony - wróć do Menu i włącz"
             tKomputer.setTextColor(if (vpn) kolor else czerwony)
@@ -1632,7 +1667,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         ekranMag.setBackgroundColor(Color.rgb(245, 248, 252))
 
         val w1 = wiersz()
-        w1.addView(przycisk("\u2190 Menu", szary) { pokazStart() })
+        w1.addView(przycisk("\u2190 Odzież", szary) { pokazOdziez() })
         tTytulMag = tekst("  Dostawa", 22f, Color.rgb(93, 64, 55), true)
         w1.addView(tTytulMag, lp(1f))
         w1.addView(przycisk("Zakończ", czerwony) { zakoncz() })
