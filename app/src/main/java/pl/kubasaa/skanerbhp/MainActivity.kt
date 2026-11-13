@@ -1849,7 +1849,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         }
         val tekst = seriaChem.take(2).joinToString("\n") { it.tekst }
         // nazwa produktu: wiersz po "nazwa handlowa" / "identyfikator produktu", inaczej największy napis
-        val m = Regex("(?i)(nazwa handlowa|nazwa produktu|identyfikator produktu|product name)[^\n]*\n?\s*[:.-]?\s*([^\n]{3,60})").find(tekst)
+        val m = Regex("""(?i)(nazwa handlowa|nazwa produktu|identyfikator produktu|product name)[^\n]*\n?\s*[:.-]?\s*([^\n]{3,60})""").find(tekst)
         val nazwa = m?.groupValues?.get(2)?.trim()?.trimStart(':', '-', ' ') ?: seriaChem.first().nazwa
         val kod = if (trybChem == 1) wydzialChem() else ""
         zapisKarty = { cel -> zapiszStronyKarty(Triple(cel.first, cel.second.ifBlank { "-" }, cel.third)) }
