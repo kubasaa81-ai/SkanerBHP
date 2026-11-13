@@ -109,6 +109,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private var trybChem = 0                                  // 0 do ustalenia, 1 bez kart, 2 zdjęcie substancji
     private lateinit var wWydzChem: LinearLayout
     private lateinit var bKartaChem: Button
+    private lateinit var wGaleriaChem: LinearLayout
     // seria zdjęć: 1 substancje (wydział na końcu), 2 strony karty znanego produktu, 3 strony karty - produkt rozpozna z karty
     private var trybSerii = 0
     private class ZdjSerii(val plik: File) { @Volatile var tekst = ""; @Volatile var nazwa = ""; @Volatile var gotowe = false; var zrobione = false }
@@ -230,6 +231,24 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private val galeriaChem = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(10)) { uris ->
         val cel = celZdjecia
         if (cel != null && cel.first != -2) for (u in uris) zapiszZdjecieChem(cel, { contentResolver.openInputStream(u) }, typZdjeciaChem) {}
+    }
+    // seria: zdjęcia z galerii dokładane do serii (substancje / strony karty)
+    private val galeriaSerii = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(20)) { uris ->
+        if (uris.isEmpty()) {
+            if (seriaChem.isEmpty()) zakonczSerie() else pytajSerie()
+        } else {
+            for (u in uris) {
+                try {
+                    val f = File(cacheDir, "seria_${System.currentTimeMillis()}_${seriaChem.size}.jpg")
+                    contentResolver.openInputStream(u)?.use { we -> FileOutputStream(f).use { we.copyTo(it) } }
+                    if (f.exists() && f.length() > 0) dodajDoSerii(f, false)
+                } catch (e: Exception) {}
+            }
+            if (seriaChem.isEmpty()) {
+                Toast.makeText(this, "Nie udało się wczytać zdjęć z galerii", Toast.LENGTH_LONG).show()
+                zakonczSerie()
+            } else pytajSerie()
+        }
     }
     private val prosbaKameraChem = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         if (ok) zrobZdjecieChem() else Toast.makeText(this, "Bez zgody na aparat - wybierz zdjęcie z galerii", Toast.LENGTH_LONG).show()
@@ -1193,6 +1212,14 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
 
         bRozpoznajChem = przycisk("\uD83D\uDCF7  Zrób zdjęcie\n(potem: kolejne albo koniec, na końcu wybierzesz wydział)", fiolet, 18f) { startSeriiSubstancji() }
         ekranChem.addView(bRozpoznajChem, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(110)))
+        val wG = wiersz()
+        wGaleriaChem = wG
+        wG.addView(przycisk("\uD83D\uDDBC  Z galerii (kilka zdjęć naraz)", Color.rgb(0, 121, 107), 16f) {
+            if (trybChem == 1) startSeriiKarty(null, true) else startSeriiSubstancji(true)
+        }, lp(1f))
+        val lpG = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(60))
+        lpG.topMargin = dp(6)
+        ekranChem.addView(wG, lpG)
         bKartaChem = przycisk("\uD83D\uDCC4  Jest karta - zrób zdjęcie\n(strony po kolei, produkt rozpozna z karty)", Color.rgb(198, 40, 40), 17f) { startSeriiKarty(null) }
         val lpK = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(96))
         lpK.topMargin = dp(6)
@@ -1245,6 +1272,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         wWydzChem.visibility = if (lista) View.VISIBLE else View.GONE
         bRozpoznajChem.visibility = if (lista) View.GONE else View.VISIBLE
         bKartaChem.visibility = if (t == 1) View.VISIBLE else View.GONE
+        wGaleriaChem.visibility = if (t == 0) View.GONE else View.VISIBLE
         wPrzyciskiChem.visibility = View.GONE              // wydział wybierany na końcu serii zdjęć
         tryb = "CHEMIA"
         setContentView(ekranChem)
@@ -1700,19 +1728,28 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     // ------------------------------------------------------------------
     //  SERIE ZDJĘĆ: substancje (wydział na końcu) i strony karty charakterystyki
     // ------------------------------------------------------------------
-    private fun startSeriiSubstancji() {
+    private fun startSeriiSubstancji(galeria: Boolean = false) {
         zakonczSerie()
         trybSerii = 1
         typZdjeciaChem = "E"
-        zrobZdjecieChem()
+        if (galeria) otworzGalerieSerii() else zrobZdjecieChem()
+    }
+
+    private fun otworzGalerieSerii() {
+        galeriaSerii.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
     }
 
     // cel = produkt z listy "bez kart"; null = produkt rozpozna z karty
-    private fun startSeriiKarty(cel: Triple<Int, String, String>?) {
+    private fun startSeriiKarty(cel: Triple<Int, String, String>?, galeria: Boolean = false) {
         zakonczSerie()
         trybSerii = if (cel != null) 2 else 3
         kartaCel = cel
         typZdjeciaChem = "K"
+        if (galeria) {
+            Toast.makeText(this, "Wybierz strony karty po kolei (1. strona z nazwą produktu)", Toast.LENGTH_LONG).show()
+            otworzGalerieSerii()
+            return
+        }
         if (cel != null) Toast.makeText(this, "Karta: ${cel.third} - zrób zdjęcie 1. strony", Toast.LENGTH_LONG).show()
         else Toast.makeText(this, "Zrób zdjęcie 1. strony karty (z nazwą produktu)", Toast.LENGTH_LONG).show()
         zrobZdjecieChem()
@@ -1727,15 +1764,15 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         zapisKarty = null
     }
 
-    private fun dodajDoSerii(f: File) {
-        val kopia = File(cacheDir, "seria_${System.currentTimeMillis()}.jpg")
-        if (!f.renameTo(kopia)) { f.copyTo(kopia, true); f.delete() }
+    private fun dodajDoSerii(f: File, pytaj: Boolean = true) {
+        val kopia = if (f.name.startsWith("seria_")) f else File(cacheDir, "seria_${System.currentTimeMillis()}.jpg")
+        if (kopia != f && !f.renameTo(kopia)) { f.copyTo(kopia, true); f.delete() }
         val z = ZdjSerii(kopia)
         seriaChem.add(z)
         ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
         // napis czytany od razu w tle (substancje - każde zdjęcie, karta - pierwsze 2 strony)
         if (trybSerii == 1 || (trybSerii == 3 && seriaChem.size <= 2)) czytajNapis(z) else z.gotowe = true
-        pytajSerie()
+        if (pytaj) pytajSerie()
     }
 
     private fun czytajNapis(z: ZdjSerii) {
@@ -1761,9 +1798,16 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             .setMessage(if (karta) "Zrób zdjęcie następnej strony albo zakończ." else "Zrób kolejne zdjęcie albo zakończ - wtedy wybierzesz wydział.")
             .setPositiveButton(if (karta) "Następna strona" else "Kolejne zdjęcie") { _, _ -> zrobZdjecieChem() }
             .setNegativeButton("Koniec") { _, _ -> koniecSerii() }
-            .setNeutralButton("Usuń ostatnie") { _, _ ->
-                seriaChem.removeLastOrNull()?.plik?.delete()
-                if (seriaChem.isEmpty()) zakonczSerie() else pytajSerie()
+            .setNeutralButton("Galeria / usuń") { _, _ ->
+                AlertDialog.Builder(this)
+                    .setItems(arrayOf("\uD83D\uDDBC  Dodaj z galerii", "\u2716  Usuń ostatnie zdjęcie")) { _, i ->
+                        if (i == 0) otworzGalerieSerii() else {
+                            seriaChem.removeLastOrNull()?.plik?.delete()
+                            if (seriaChem.isEmpty()) zakonczSerie() else pytajSerie()
+                        }
+                    }
+                    .setOnCancelListener { pytajSerie() }
+                    .show()
             }
             .setCancelable(false)
             .show()
