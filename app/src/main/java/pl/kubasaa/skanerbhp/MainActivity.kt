@@ -624,8 +624,14 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             "Komputer jeszcze się nie połączył - Wydanie -> \"Lista na telefon\""
         }
         val kolor = if (komputerWidziany()) zielony else pomaranczowy
-        tKomputerStart.text = if (komputerWidziany()) k else if (ostatniKontakt > 0) "Komputer chwilowo nie odpytuje telefonu" else "Komputer jeszcze się nie połączył"
-        tKomputerStart.setTextColor(kolor)
+        // ekran startowy: połączenie w tle (Program BHP otwarty) też się liczy - nie tylko Wydanie odzieży
+        tKomputerStart.text = when {
+            komputerWidziany() -> k
+            tloWidziane() -> "✔ Program BHP otwarty - komputer połączony (wymiana w tle)"
+            !vpn -> "Komputer nie widzi telefonu - włącz GlobalProtect"
+            else -> "Czekam na komputer - Program BHP połączy się sam w kilka sekund po otwarciu"
+        }
+        tKomputerStart.setTextColor(if (komputerWidziany() || tloWidziane()) zielony else pomaranczowy)
         if (::tKomputerOdz.isInitialized) {
             tKomputerOdz.text = k
             tKomputerOdz.setTextColor(kolor)
