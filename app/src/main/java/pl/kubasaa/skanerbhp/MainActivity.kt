@@ -47,6 +47,7 @@ import android.media.ExifInterface
 import android.text.Editable
 import android.text.TextWatcher
 import android.widget.ImageView
+import android.widget.ListView
 import androidx.activity.result.PickVisualMediaRequest
 import java.io.File
 import java.io.FileOutputStream
@@ -76,6 +77,9 @@ import kotlin.system.exitProcess
  * Etykiety chemii: komputer wysyła spis substancji (produkt x wydział), na wydziale robisz zdjęcia etykiet
  *   produktów "do ustalenia" (czy niebezpieczny, czy karta wymagana) - komputer pobiera je do produktów
  *   (Spis substancji -> "Zdjęcia z telefonu").  Lista zostaje w telefonie, gdy na hali nie ma zasięgu.
+ * Maszyny - pomiary: komputer wysyła źródła z pomiarów (stary spis) i kartotekę maszyn; na hali przypisujesz
+ *   źródłu maszynę z kartoteki (nr inw. z tabliczki albo wybór z listy, kilka maszyn = rozbicie, "nie maszyna");
+ *   komputer pobiera przypisania (Pomiary -> Maszyny w pomiarach -> "Połączenia z telefonu").
  * Zdjęcia (wypadki): zdjęcia zrobione zwykłym aparatem wybierasz z galerii (podgląd, opis każdego) -
  *   kopie (pomniejszone) czekają w aplikacji, komputer pobiera je do protokołu oględzin
  *   (Oględziny -> "Z telefonu") i wtedy aplikacja kasuje swoje kopie.
@@ -94,6 +98,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private lateinit var ekranZdj: LinearLayout
     private lateinit var ekranChem: LinearLayout
     private lateinit var ekranOdziez: LinearLayout
+    private lateinit var ekranMasz: LinearLayout
     private lateinit var tKomputerOdz: TextView
     @Volatile private var tryb = "MENU"            // MENU / WYDANIE / DOSTAWA / INWENTURA / KODY / ZDJECIA / CHEMIA
     private val naWydaniu: Boolean get() = tryb == "WYDANIE"
@@ -156,6 +161,21 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private val prosbaKameraChem = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         if (ok) zrobZdjecieChem() else Toast.makeText(this, "Bez zgody na aparat - wybierz zdjęcie z galerii", Toast.LENGTH_LONG).show()
     }
+
+    // maszyny - pomiary: lista z komputera maszyny/lista.txt, przypisania maszyny/powiazania.txt ("idZ|P/R/X|id,id")
+    private class ZrodloM(val id: Int, val kod: String, val nazwa: String, val typ: String, val nrInw: String, val idM: Int, val opisM: String, val poza: Boolean)
+    private class MaszynaK(val id: Int, val kod: String, val nrInw: String, val nrWewn: String, val nazwa: String, val typ: String, val miejsce: String)
+    private var zrodlaM: List<ZrodloM> = emptyList()
+    private var kartotekaM: List<MaszynaK> = emptyList()
+    @Volatile private var dataListyM = ""
+    private val folderMasz: File by lazy { File(filesDir, "maszyny").apply { mkdirs() } }
+    private lateinit var tKomputerMasz: TextView
+    private lateinit var tStanMasz: TextView
+    private lateinit var spWydzMasz: Spinner
+    private lateinit var bTylkoMasz: Button
+    private lateinit var listaMaszWidok: LinearLayout
+    private var wszystkieMasz = false
+    private var wydzialyMasz: List<String> = emptyList()
 
     // start
     private lateinit var tSiec: TextView
@@ -254,6 +274,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         zbudujMagazyn()
         zbudujZdjecia()
         zbudujChemie()
+        zbudujMaszyny()
         pokazStart()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
             prosbaSms.launch(Manifest.permission.SEND_SMS)
@@ -334,7 +355,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         ekranStart.setBackgroundColor(Color.rgb(245, 248, 252))
 
         ekranStart.addView(tekst("Skaner BHP", 30f, Color.rgb(0, 105, 92), true))
-        ekranStart.addView(tekst("Program BHP - odzież i ŚOI, wypadki, chemia", 15f, szary))
+        ekranStart.addView(tekst("Program BHP - odzież i ŚOI, wypadki, chemia, maszyny", 15f, szary))
 
         tSiec = tekst("", 15f, szary, true)
         tSiec.setPadding(0, dp(16), 0, 0)
@@ -349,6 +370,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         ekranStart.addView(przycisk("Odzież i ŚOI", Color.rgb(46, 125, 50), 24f) { pokazOdziez() }, lpPelny(18))
         ekranStart.addView(przycisk("Wypadki - zdjęcia", Color.rgb(198, 40, 40), 22f) { pokazZdjecia() }, lpPelny(12))
         ekranStart.addView(przycisk("Chemia - etykiety", Color.rgb(106, 27, 154), 22f) { pokazChemie() }, lpPelny(12))
+        ekranStart.addView(przycisk("Maszyny - pomiary", Color.rgb(69, 90, 100), 22f) { pokazMaszyny() }, lpPelny(12))
 
         val odstep = View(this)
         ekranStart.addView(odstep, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -533,6 +555,15 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                 else -> "Komputer pobierze zdjęcia: Oględziny -> \"Z telefonu\""
             }
             tKomputerZdj.setTextColor(if (vpn && komputerWidziany()) zielony else szary)
+        }
+        if (::tKomputerMasz.isInitialized) {
+            tKomputerMasz.text = when {
+                zrodlaM.isEmpty() -> "Brak listy - w komputerze: Pomiary -> Maszyny w pomiarach -> \"Lista na telefon\""
+                !vpn -> "Lista z $dataListyM - przypisania czekają w telefonie, komputer pobierze je później"
+                komputerWidziany() -> "\u2714 Komputer połączony ($adresKomputera)  -  lista z $dataListyM"
+                else -> "Lista z $dataListyM - komputer pobierze: Maszyny w pomiarach -> \"Połączenia z telefonu\""
+            }
+            tKomputerMasz.setTextColor(if (zrodlaM.isEmpty()) pomaranczowy else if (vpn && komputerWidziany()) zielony else szary)
         }
         if (::tKomputerChem.isInitialized) {
             tKomputerChem.text = when {
@@ -1248,6 +1279,346 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             if (tryb == "CHEMIA") {
                 ustawWydzialyChem()
                 Toast.makeText(this, "✔ Komputer pobrał zdjęcia etykiet", Toast.LENGTH_LONG).show()
+                ton?.startTone(ToneGenerator.TONE_PROP_BEEP2, 300)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  MASZYNY - POMIARY
+    //  POST /maszyny: "MSL|data" + linie "Z|idZ|kod|nazwa|typ|nr inw|idM|opis maszyny|poza"
+    //                                 i "M|idM|kod|nr inw|nr wewn|nazwa|typ|miejsce"
+    //  GET /maszyny_powiazania -> "MSP|n" + linie "idZ|P|idM" / "idZ|R|idM,idM" / "idZ|X|"
+    //  POST /maszyny_odebrane "idZ,idZ" - komputer zapisał
+    // ------------------------------------------------------------------
+    private fun zbudujMaszyny() {
+        ekranMasz = LinearLayout(this)
+        ekranMasz.orientation = LinearLayout.VERTICAL
+        ekranMasz.setPadding(dp(12), dp(12), dp(12), dp(12))
+        ekranMasz.setBackgroundColor(Color.rgb(245, 248, 252))
+        val grafit = Color.rgb(69, 90, 100)
+
+        val w1 = wiersz()
+        w1.addView(przycisk("← Menu", szary) { pokazStart() })
+        w1.addView(tekst("  Maszyny - pomiary", 22f, grafit, true), lp(1f))
+        ekranMasz.addView(w1)
+        tKomputerMasz = tekst("", 13f, szary)
+        tKomputerMasz.setPadding(0, dp(6), 0, dp(4))
+        ekranMasz.addView(tKomputerMasz)
+
+        val w2 = wiersz()
+        w2.addView(tekst("Wydział: ", 16f, szary, true))
+        spWydzMasz = Spinner(this)
+        w2.addView(spWydzMasz, lp(1f))
+        bTylkoMasz = przycisk("Do połączenia", pomaranczowy, 13f) {
+            wszystkieMasz = !wszystkieMasz
+            pokazListeMasz()
+        }
+        w2.addView(bTylkoMasz, lp(1f, 6))
+        ekranMasz.addView(w2)
+        spWydzMasz.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) = pokazListeMasz()
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+        tStanMasz = tekst("", 14f, szary, true)
+        tStanMasz.gravity = Gravity.CENTER
+        tStanMasz.setPadding(0, dp(6), 0, dp(6))
+        ekranMasz.addView(tStanMasz)
+        val przew = ScrollView(this)
+        listaMaszWidok = LinearLayout(this)
+        listaMaszWidok.orientation = LinearLayout.VERTICAL
+        przew.addView(listaMaszWidok)
+        ekranMasz.addView(przew, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        wczytajListeMaszZPliku()
+    }
+
+    private fun pokazMaszyny() {
+        zatrzymajKamere()
+        tryb = "MASZYNY"
+        setContentView(ekranMasz)
+        ustawWydzialyMasz()
+        pokazStan()
+    }
+
+    private fun wczytajListeMaszZPliku() {
+        val f = File(folderMasz, "lista.txt")
+        if (f.exists()) try { przetworzListeMasz(f.readText(Charsets.UTF_8)) } catch (e: Exception) {}
+    }
+
+    private fun przetworzListeMasz(tekst: String) {
+        val linie = tekst.replace("\r", "").split("\n")
+        if (linie.isEmpty() || !linie[0].startsWith("MSL|")) return
+        val z = mutableListOf<ZrodloM>()
+        val m = mutableListOf<MaszynaK>()
+        for (l in linie.drop(1)) {
+            val p = l.split("|").map { polskie(it.trim()) }
+            if (p.size >= 9 && p[0] == "Z") {
+                val id = p[1].toIntOrNull() ?: continue
+                z.add(ZrodloM(id, p[2], p[3], p[4], p[5], p[6].toIntOrNull() ?: 0, p[7], p[8] == "1"))
+            } else if (p.size >= 8 && p[0] == "M") {
+                val id = p[1].toIntOrNull() ?: continue
+                m.add(MaszynaK(id, p[2], p[3], p[4], p[5], p[6], p[7]))
+            }
+        }
+        zrodlaM = z
+        kartotekaM = m
+        dataListyM = linie[0].substringAfter("|").trim()
+    }
+
+    // serwer: POST /maszyny
+    override fun maszyny(tekst: String) {
+        try { File(folderMasz, "lista.txt").writeText(tekst, Charsets.UTF_8) } catch (e: Exception) {}
+        przetworzListeMasz(tekst)
+        try { File(folderMasz, "wyslane.txt").delete() } catch (e: Exception) {}
+        runOnUiThread {
+            if (tryb == "MASZYNY") ustawWydzialyMasz()
+            Toast.makeText(this, "Z komputera: ${zrodlaM.size} maszyn z pomiarów, kartoteka ${kartotekaM.size} poz.", Toast.LENGTH_SHORT).show()
+            ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
+        }
+    }
+
+    private fun powiazaniaMasz(): MutableMap<Int, Pair<String, String>> {
+        val wyn = linkedMapOf<Int, Pair<String, String>>()
+        val f = File(folderMasz, "powiazania.txt")
+        if (f.exists()) for (l in f.readLines(Charsets.UTF_8)) {
+            val p = l.split("|")
+            val id = p.getOrNull(0)?.toIntOrNull() ?: continue
+            wyn[id] = Pair(p.getOrElse(1) { "" }, p.getOrElse(2) { "" })
+        }
+        return wyn
+    }
+
+    private fun zapiszPowiazaniaMasz(m: Map<Int, Pair<String, String>>) {
+        try {
+            File(folderMasz, "powiazania.txt").writeText(m.entries.joinToString("\n") { "${it.key}|${it.value.first}|${it.value.second}" }, Charsets.UTF_8)
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun wyslaneMasz(): Set<Int> {
+        val f = File(folderMasz, "wyslane.txt")
+        return if (f.exists()) f.readLines(Charsets.UTF_8).mapNotNull { it.trim().toIntOrNull() }.toSet() else emptySet()
+    }
+
+    private fun ustawWydzialyMasz() {
+        val stary = spWydzMasz.selectedItem?.toString()
+        val pow = powiazaniaMasz()
+        val wysl = wyslaneMasz()
+        wydzialyMasz = zrodlaM.map { it.kod }.distinct().sorted()
+        val opisy = wydzialyMasz.map { k ->
+            val n = zrodlaM.count { it.kod == k && it.idM == 0 && !it.poza && !pow.containsKey(it.id) && !wysl.contains(it.id) }
+            if (n > 0) "$k  ($n do połączenia)" else k
+        }
+        spWydzMasz.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, opisy)
+        val i = if (stary != null) opisy.indexOfFirst { it.substringBefore(" ") == stary.substringBefore(" ") } else -1
+        if (i >= 0) spWydzMasz.setSelection(i)
+        pokazListeMasz()
+    }
+
+    private fun wydzialMasz(): String {
+        val i = spWydzMasz.selectedItemPosition
+        return if (i in wydzialyMasz.indices) wydzialyMasz[i] else ""
+    }
+
+    private fun opisMaszyny(m: MaszynaK): String =
+        listOf(m.nrInw, if (m.nrWewn.isNotBlank()) "nr ${m.nrWewn}" else "", m.nazwa, m.typ).filter { it.isNotBlank() }.joinToString("  ·  ")
+
+    private fun pokazListeMasz() {
+        if (!::listaMaszWidok.isInitialized) return
+        listaMaszWidok.removeAllViews()
+        bTylkoMasz.text = if (wszystkieMasz) "Pokaż: wszystkie" else "Pokaż: do połączenia"
+        val kod = wydzialMasz()
+        val pow = powiazaniaMasz()
+        val wysl = wyslaneMasz()
+        val lista = zrodlaM.filter { it.kod == kod && (wszystkieMasz || (it.idM == 0 && !it.poza && !wysl.contains(it.id))) }
+            .sortedWith(compareBy({ it.idM != 0 || it.poza }, { it.nazwa.lowercase() }, { it.typ.lowercase() }))
+        tStanMasz.text = when {
+            zrodlaM.isEmpty() -> "Najpierw w komputerze: Maszyny w pomiarach -> \"Lista na telefon\""
+            lista.isEmpty() -> "Na tym wydziale wszystko połączone" + if (pow.isNotEmpty()) "   |   przypisań do wysłania: ${pow.size}" else ""
+            else -> "Dotknij maszyny z pomiarów = wskaż ją w kartotece" + if (pow.isNotEmpty()) "   |   do wysłania: ${pow.size}" else ""
+        }
+        tStanMasz.setTextColor(if (pow.isNotEmpty()) pomaranczowy else szary)
+        for (z in lista) {
+            val p = pow[z.id]
+            val ramka = LinearLayout(this)
+            ramka.orientation = LinearLayout.VERTICAL
+            ramka.setPadding(dp(10), dp(8), dp(10), dp(8))
+            val tlo = GradientDrawable()
+            tlo.cornerRadius = dp(8).toFloat()
+            tlo.setColor(Color.WHITE)
+            tlo.setStroke(dp(2), when {
+                p != null -> zielony
+                wysl.contains(z.id) -> niebieski
+                z.idM == 0 && !z.poza -> pomaranczowy
+                else -> Color.rgb(207, 216, 220)
+            })
+            ramka.background = tlo
+            ramka.addView(tekst(listOf(z.nazwa, z.typ).filter { it.isNotBlank() }.joinToString("  "), 16f, Color.rgb(38, 50, 56), true))
+            if (z.nrInw.isNotBlank()) ramka.addView(tekst("nr inw. ze starego spisu: ${z.nrInw}", 13f, szary))
+            val stan = when {
+                p != null -> when (p.first) {
+                    "X" -> "→ to nie maszyna z kartoteki (czeka na komputer)"
+                    else -> "→ " + p.second.split(",").mapNotNull { s -> kartotekaM.firstOrNull { it.id == s.toIntOrNull() } }
+                        .joinToString("; ") { opisMaszyny(it) } + "  (czeka na komputer)"
+                }
+                wysl.contains(z.id) -> "✔ wysłane do komputera"
+                z.poza -> "nie maszyna z kartoteki"
+                z.idM != 0 -> "✔ w kartotece: ${z.opisM}"
+                else -> "DO POŁĄCZENIA - wskaż maszynę (nr inw. z tabliczki albo z listy)"
+            }
+            ramka.addView(tekst(stan, 13f, if (p != null) zielony else if (z.idM == 0 && !z.poza && !wysl.contains(z.id)) pomaranczowy else szary, true))
+            ramka.setOnClickListener { menuZrodlaMasz(z) }
+            val lpR = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            lpR.topMargin = dp(6)
+            listaMaszWidok.addView(ramka, lpR)
+        }
+    }
+
+    private fun menuZrodlaMasz(z: ZrodloM) {
+        val pow = powiazaniaMasz()
+        val opcje = mutableListOf("Wpisz nr inwentarzowy z tabliczki", "Wybierz z listy maszyn (jedną albo kilka)", "To nie maszyna z kartoteki")
+        if (pow.containsKey(z.id)) opcje.add("Usuń przypisanie z telefonu")
+        AlertDialog.Builder(this)
+            .setTitle(listOf(z.nazwa, z.typ).filter { it.isNotBlank() }.joinToString("  "))
+            .setItems(opcje.toTypedArray()) { _, k ->
+                when (k) {
+                    0 -> wpiszNrMasz(z)
+                    1 -> wybierzZListyMasz(z, "")
+                    2 -> przypiszMasz(z, "X", "")
+                    else -> {
+                        pow.remove(z.id)
+                        zapiszPowiazaniaMasz(pow)
+                        ustawWydzialyMasz()
+                    }
+                }
+            }
+            .setNegativeButton("Zamknij", null)
+            .show()
+    }
+
+    // 517104 (stary nr) -> 5017104 (kartoteka);  porównanie bez spacji, kresek i kropek
+    private fun normNr(s: String): String {
+        var n = s.filter { it.isLetterOrDigit() }.uppercase()
+        if (n.length == 6 && n.startsWith("51")) n = "50" + n.substring(1)
+        return n
+    }
+
+    private fun wpiszNrMasz(z: ZrodloM) {
+        val e = EditText(this)
+        e.hint = "np. 5017104 albo 517104"
+        e.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+        AlertDialog.Builder(this)
+            .setTitle("Nr inwentarzowy z tabliczki")
+            .setMessage("Szuka w numerach inwentarzowych i wewnętrznych całej kartoteki.")
+            .setView(e)
+            .setPositiveButton("Szukaj") { _, _ ->
+                val nr = normNr(e.text.toString())
+                if (nr.isEmpty()) return@setPositiveButton
+                val trafione = kartotekaM.filter { normNr(it.nrInw) == nr || normNr(it.nrWewn) == nr }
+                when (trafione.size) {
+                    0 -> {
+                        Toast.makeText(this, "Nie ma maszyny o numerze $nr - wybierz z listy", Toast.LENGTH_LONG).show()
+                        wybierzZListyMasz(z, e.text.toString().trim())
+                    }
+                    1 -> {
+                        val m = trafione[0]
+                        AlertDialog.Builder(this)
+                            .setTitle("Przypisać tę maszynę?")
+                            .setMessage(opisMaszyny(m) + (if (m.kod.isNotBlank()) "\nwydział: ${m.kod}" else "") + (if (m.miejsce.isNotBlank()) "\n${m.miejsce}" else ""))
+                            .setPositiveButton("Tak") { _, _ -> przypiszMasz(z, "P", m.id.toString()) }
+                            .setNegativeButton("Nie", null)
+                            .show()
+                    }
+                    else -> wybierzZListyMasz(z, e.text.toString().trim())
+                }
+            }
+            .setNegativeButton("Anuluj", null)
+            .show()
+    }
+
+    // lista kartoteki: najpierw wydział maszyny z pomiarów; szukanie po nazwie / numerach (wtedy cała kartoteka)
+    private fun wybierzZListyMasz(z: ZrodloM, szukaj: String) {
+        val kol = LinearLayout(this)
+        kol.orientation = LinearLayout.VERTICAL
+        kol.setPadding(dp(12), dp(6), dp(12), 0)
+        val e = EditText(this)
+        e.hint = "Szukaj: nazwa, nr inw., nr wewn."
+        e.setText(szukaj)
+        kol.addView(e)
+        val lv = ListView(this)
+        lv.choiceMode = ListView.CHOICE_MODE_MULTIPLE
+        kol.addView(lv, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(420)))
+        var widoczne: List<MaszynaK> = emptyList()
+        val zaznaczone = mutableSetOf<Int>()
+        fun odswiez() {
+            val s = e.text.toString().trim().lowercase()
+            val sn = normNr(s)
+            widoczne = (if (s.isEmpty()) kartotekaM.filter { it.kod == z.kod } else kartotekaM.filter {
+                it.nazwa.lowercase().contains(s) || it.typ.lowercase().contains(s) ||
+                        (sn.isNotEmpty() && (normNr(it.nrInw).contains(sn) || normNr(it.nrWewn) == sn))
+            }).sortedWith(compareBy({ it.kod != z.kod }, { it.nazwa.lowercase() }, { it.nrWewn }))
+            lv.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_multiple_choice,
+                widoczne.map { opisMaszyny(it) + if (it.kod != z.kod && it.kod.isNotBlank()) "  [${it.kod}]" else "" })
+            for (i in widoczne.indices) lv.setItemChecked(i, zaznaczone.contains(widoczne[i].id))
+        }
+        lv.setOnItemClickListener { _, _, pos, _ ->
+            val id = widoczne[pos].id
+            if (lv.isItemChecked(pos)) zaznaczone.add(id) else zaznaczone.remove(id)
+        }
+        e.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(a: CharSequence?, b: Int, c: Int, d: Int) {}
+            override fun onTextChanged(a: CharSequence?, b: Int, c: Int, d: Int) {}
+            override fun afterTextChanged(x: Editable?) = odswiez()
+        })
+        odswiez()
+        AlertDialog.Builder(this)
+            .setTitle("Maszyna z kartoteki dla: " + listOf(z.nazwa, z.typ).filter { it.isNotBlank() }.joinToString(" "))
+            .setView(kol)
+            .setPositiveButton("Przypisz zaznaczone") { _, _ ->
+                when (zaznaczone.size) {
+                    0 -> Toast.makeText(this, "Nic nie zaznaczono", Toast.LENGTH_SHORT).show()
+                    1 -> przypiszMasz(z, "P", zaznaczone.first().toString())
+                    else -> AlertDialog.Builder(this)
+                        .setTitle("Rozbić na ${zaznaczone.size} maszyn?")
+                        .setMessage("To jedno źródło z pomiarów (np. \"Plecionkarka nr 51-60\") zostanie zastąpione ${zaznaczone.size} maszynami z kartoteki w tych samych grupach pomiarowych.")
+                        .setPositiveButton("Tak") { _, _ -> przypiszMasz(z, "R", zaznaczone.joinToString(",")) }
+                        .setNegativeButton("Nie", null)
+                        .show()
+                }
+            }
+            .setNegativeButton("Anuluj", null)
+            .show()
+    }
+
+    private fun przypiszMasz(z: ZrodloM, akcja: String, ids: String) {
+        val pow = powiazaniaMasz()
+        pow[z.id] = Pair(akcja, ids)
+        zapiszPowiazaniaMasz(pow)
+        ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
+        ustawWydzialyMasz()
+    }
+
+    // serwer: GET /maszyny_powiazania
+    override fun maszynyPowiazania(): String {
+        val pow = powiazaniaMasz()
+        return "MSP|" + pow.size + pow.entries.joinToString("") { "\n${it.key}|${it.value.first}|${it.value.second}" }
+    }
+
+    // serwer: POST /maszyny_odebrane "idZ,idZ"
+    override fun maszynyOdebrane(tekst: String) {
+        val pow = powiazaniaMasz()
+        val wysl = wyslaneMasz().toMutableSet()
+        for (t in tekst.split(",")) {
+            val id = t.trim().toIntOrNull() ?: continue
+            pow.remove(id)
+            wysl.add(id)
+        }
+        zapiszPowiazaniaMasz(pow)
+        try { File(folderMasz, "wyslane.txt").writeText(wysl.joinToString("\n"), Charsets.UTF_8) } catch (e: Exception) {}
+        runOnUiThread {
+            if (tryb == "MASZYNY") {
+                ustawWydzialyMasz()
+                Toast.makeText(this, "✔ Komputer zapisał połączenia maszyn", Toast.LENGTH_LONG).show()
                 ton?.startTone(ToneGenerator.TONE_PROP_BEEP2, 300)
             }
         }

@@ -23,6 +23,9 @@ import java.util.concurrent.Executors
  *   GET  /chemia_zdjecia  -> zdjęcia etykiet czekające w telefonie, linie "nr|id produktu|kod wydziału|nazwa"
  *   GET  /chemia_zdjecie?nr=N -> plik JPG
  *   POST /chemia_odebrane -> "nr,nr,..." komputer zapisał zdjęcia - telefon je kasuje
+ *   POST /maszyny         -> źródła z pomiarów + kartoteka maszyn (łączenie na hali)
+ *   GET  /maszyny_powiazania -> przypisania z telefonu, linie "id źródła|P/R/X|id maszyn"
+ *   POST /maszyny_odebrane -> "id,id" komputer zapisał połączenia
  *   POST /sms             -> "numer\ntreść" - telefon wysyła SMS (np. hasło do pliku z danymi osobowymi);
  *                            odpowiedź: OK | OTWARTO (bez zgody na SMS: otwarte Wiadomości z gotowym tekstem) | BLAD|opis
  */
@@ -45,6 +48,9 @@ class Serwer(private val obsluga: Obsluga) {
         fun chemiaZdjecia(): String
         fun chemiaZdjecie(nr: Int): ByteArray?
         fun chemiaOdebrane(tekst: String)
+        fun maszyny(tekst: String)
+        fun maszynyPowiazania(): String
+        fun maszynyOdebrane(tekst: String)
     }
 
     @Volatile private var gniazdo: ServerSocket? = null
@@ -160,6 +166,9 @@ class Serwer(private val obsluga: Obsluga) {
                 sciezka == "/chemia" && metoda == "POST" -> { obsluga.chemia(cialo); "OK" }
                 sciezka == "/chemia_zdjecia" -> obsluga.chemiaZdjecia()
                 sciezka == "/chemia_odebrane" && metoda == "POST" -> { obsluga.chemiaOdebrane(cialo); "OK" }
+                sciezka == "/maszyny" && metoda == "POST" -> { obsluga.maszyny(cialo); "OK" }
+                sciezka == "/maszyny_powiazania" -> obsluga.maszynyPowiazania()
+                sciezka == "/maszyny_odebrane" && metoda == "POST" -> { obsluga.maszynyOdebrane(cialo); "OK" }
                 sciezka == "/" -> "Skaner BHP - połączenie działa ✔"
                 else -> "?"
             }
