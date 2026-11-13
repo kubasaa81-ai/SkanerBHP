@@ -46,6 +46,7 @@ import android.graphics.Matrix
 import android.media.ExifInterface
 import android.text.Editable
 import android.text.TextWatcher
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.ListView
 import androidx.activity.result.PickVisualMediaRequest
@@ -1210,7 +1211,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         przewChem.addView(listaChemWidok)
         ekranChem.addView(przewChem, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        bRozpoznajChem = przycisk("\uD83D\uDCF7  Zrób zdjęcie\n(potem: kolejne albo koniec, na końcu wybierzesz wydział)", fiolet, 18f) { startSeriiSubstancji() }
+        bRozpoznajChem = przycisk("\uD83D\uDCF7  Zdjęcie produktu\n(wydział -> zdjęcia -> zakończ = zapis)", fiolet, 18f) { startSeriiSubstancji() }
         ekranChem.addView(bRozpoznajChem, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(110)))
         val wG = wiersz()
         wGaleriaChem = wG
@@ -1363,7 +1364,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         if (trybChem == 2) {
             val czeka = zdjeciaChem().size
             tStanChem.text = (if (listaChem.isEmpty()) "Spis przyjdzie sam, gdy na komputerze będzie otwarty Program BHP\n" else "") +
-                "Rób zdjęcia etykiet po kolei. Na koniec wybierzesz wydział - telefon rozpozna produkty, a nowe komputer dopisze do spisu." +
+                "Jeden produkt = jedna seria: wybierz wydział, zrób zdjęcia (albo z galerii), Zakończ. Telefon rozpozna produkt, nowy komputer dopisze do spisu." +
                 if (czeka > 0) "\nZdjęć czeka na komputer: $czeka" else ""
             tStanChem.setTextColor(if (czeka > 0) pomaranczowy else szary)
             return
@@ -1684,7 +1685,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         val d = AlertDialog.Builder(this)
             .setTitle("Produkt ze spisu")
             .setView(kol)
-            .setNegativeButton("Wróć") { _, _ -> wyborProduktuChem(plik, kod, "", "") }
+            .setNegativeButton("Wróć") { _, _ -> wrocWybor?.invoke() ?: wyborProduktuChem(plik, kod, "", "") }
             .setCancelable(false)
             .create()
         lv.setOnItemClickListener { _, _, i, _ ->
@@ -1709,7 +1710,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                 val n = e.text.toString().trim()
                 zapiszRozpoznaneChem(plik, Triple(if (n.isEmpty()) -1 else 0, kod, n), odczyt)
             }
-            .setNegativeButton("Wróć") { _, _ -> wyborProduktuChem(plik, kod, "", nazwa) }
+            .setNegativeButton("Wróć") { _, _ -> wrocWybor?.invoke() ?: wyborProduktuChem(plik, kod, "", nazwa) }
             .setCancelable(false)
             .show()
     }
@@ -1726,13 +1727,124 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     }
 
     // ------------------------------------------------------------------
-    //  SERIE ZDJĘĆ: substancje (wydział na końcu) i strony karty charakterystyki
+    //  SERIE ZDJĘĆ (nowoczesne okna):
+    //   substancja: wydział -> aparat / galeria -> kolejne zdjęcia tego samego produktu -> Zakończ = zapis (1 produkt)
+    //   karta charakterystyki: strony po kolei -> jeden plik karty na komputerze
     // ------------------------------------------------------------------
+    private var kodSerii = ""
+    private var ostatniKodSerii = ""
+    private var wrocWybor: (() -> Unit)? = null
+
+    // okno w nowoczesnym stylu: tytuł, opis, treść, kolorowe przyciski na całą szerokość
+    private fun okno(tytul: String, opis: String?, tresc: View?, przyciski: List<Triple<String, Int, () -> Unit>>,
+                     anuluj: (() -> Unit)? = null): AlertDialog {
+        val kol = LinearLayout(this)
+        kol.orientation = LinearLayout.VERTICAL
+        kol.setPadding(dp(20), dp(20), dp(20), dp(16))
+        val tlo = GradientDrawable()
+        tlo.cornerRadius = dp(22).toFloat()
+        tlo.setColor(Color.WHITE)
+        kol.background = tlo
+        kol.addView(tekst(tytul, 21f, Color.rgb(74, 20, 140), true))
+        if (!opis.isNullOrBlank()) {
+            val o = tekst(opis, 15f, szary)
+            o.setPadding(0, dp(6), 0, dp(4))
+            kol.addView(o)
+        }
+        if (tresc != null) {
+            val p = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            p.topMargin = dp(10)
+            kol.addView(tresc, p)
+        }
+        val d = AlertDialog.Builder(this).setView(kol).setCancelable(anuluj != null).create()
+        for ((t, k, a) in przyciski) {
+            val b = przycisk(t, k, 17f) { d.dismiss(); a() }
+            val p = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58))
+            p.topMargin = dp(8)
+            kol.addView(b, p)
+        }
+        if (anuluj != null) d.setOnCancelListener { anuluj() }
+        d.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+        d.show()
+        return d
+    }
+
+    private val koloryWydz = intArrayOf(Color.rgb(21, 101, 192), Color.rgb(0, 121, 107), Color.rgb(106, 27, 154), Color.rgb(230, 81, 0),
+        Color.rgb(46, 125, 50), Color.rgb(173, 20, 87), Color.rgb(69, 90, 100), Color.rgb(198, 40, 40))
+
     private fun startSeriiSubstancji(galeria: Boolean = false) {
         zakonczSerie()
-        trybSerii = 1
-        typZdjeciaChem = "E"
-        if (galeria) otworzGalerieSerii() else zrobZdjecieChem()
+        wybierzWydzialSerii(galeria)
+    }
+
+    // 1. wydział (kafelki, wszystkie wydziały z komputera)
+    private fun wybierzWydzialSerii(galeria: Boolean = false) {
+        val wsz = wszystkieWydzChem.ifEmpty { wydzialyChem.map { Pair(it, "") } }
+        val siatka = LinearLayout(this)
+        siatka.orientation = LinearLayout.VERTICAL
+        var d: AlertDialog? = null
+        fun wybrano(kod: String) {
+            d?.dismiss()
+            kodSerii = kod
+            if (kod != "-") ostatniKodSerii = kod
+            trybSerii = 1
+            typZdjeciaChem = "E"
+            if (galeria) otworzGalerieSerii() else zrodloSerii()
+        }
+        fun kafel(t: String, kolor: Int, akcja: () -> Unit): Button {
+            val b = przycisk(t, kolor, 15f) { akcja() }
+            b.minHeight = dp(70)
+            return b
+        }
+        if (ostatniKodSerii.isNotEmpty()) {
+            val nz = wsz.firstOrNull { it.first == ostatniKodSerii }?.second ?: ""
+            val b = kafel("↻  Ten sam: $ostatniKodSerii" + if (nz.isNotBlank()) "  -  $nz" else "", Color.rgb(74, 20, 140)) { wybrano(ostatniKodSerii) }
+            siatka.addView(b, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        }
+        var i = 0
+        while (i < wsz.size) {
+            val w = wiersz()
+            for (j in 0..1) {
+                if (i + j < wsz.size) {
+                    val (k, n) = wsz[i + j]
+                    w.addView(kafel(k + if (n.isNotBlank()) "\n" + n else "", koloryWydz[(i + j) % koloryWydz.size]) { wybrano(k) }, lp(1f, if (j == 1) 6 else 0))
+                } else w.addView(View(this), lp(1f, 6))
+            }
+            val p = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            p.topMargin = dp(6)
+            siatka.addView(w, p)
+            i += 2
+        }
+        val w2 = wiersz()
+        w2.addView(kafel("✎  Inny - wpiszę kod", Color.rgb(96, 125, 139)) {
+            d?.dismiss()
+            val e = EditText(this)
+            e.hint = "Kod wydziału, np. DH"
+            e.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+            okno("Kod wydziału", null, e, listOf(
+                Triple("OK", zielony) { val k = e.text.toString().trim(); if (k.isEmpty()) wybierzWydzialSerii(galeria) else wybrano(k) },
+                Triple("Wróć", szary) { wybierzWydzialSerii(galeria) }))
+        }, lp(1f))
+        w2.addView(kafel("Nie wiem /\nbez wydziału", Color.rgb(120, 144, 156)) { wybrano("-") }, lp(1f, 6))
+        val p2 = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        p2.topMargin = dp(10)
+        siatka.addView(w2, p2)
+        val sv = ScrollView(this)
+        sv.addView(siatka)
+        sv.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.6).toInt())
+        val ramka = LinearLayout(this)
+        ramka.addView(sv, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (resources.displayMetrics.heightPixels * 0.6).toInt()))
+        d = okno("Z jakiego wydziału?", "Najpierw wydział, potem zdjęcia jednego produktu.", ramka,
+            listOf(Triple("Anuluj", szary) { zakonczSerie() }))
+    }
+
+    // 2. aparat albo galeria
+    private fun zrodloSerii() {
+        okno("Zdjęcie produktu" + if (kodSerii != "-") "  ($kodSerii)" else "",
+            "Zrób zdjęcie etykiety albo wybierz zdjęcia z galerii (kilka zdjęć = ten sam produkt).", null, listOf(
+                Triple("📷  Zrób zdjęcie", Color.rgb(106, 27, 154)) { zrobZdjecieChem() },
+                Triple("🖼  Z galerii", Color.rgb(0, 121, 107)) { otworzGalerieSerii() },
+                Triple("Anuluj", szary) { zakonczSerie() }))
     }
 
     private fun otworzGalerieSerii() {
@@ -1750,9 +1862,10 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             otworzGalerieSerii()
             return
         }
-        if (cel != null) Toast.makeText(this, "Karta: ${cel.third} - zrób zdjęcie 1. strony", Toast.LENGTH_LONG).show()
-        else Toast.makeText(this, "Zrób zdjęcie 1. strony karty (z nazwą produktu)", Toast.LENGTH_LONG).show()
-        zrobZdjecieChem()
+        okno("Karta charakterystyki", (if (cel != null) cel.third + "\n" else "") + "Zrób zdjęcia stron po kolei (1. strona z nazwą produktu) albo wybierz je z galerii.", null, listOf(
+            Triple("📷  Zrób zdjęcie strony 1", Color.rgb(198, 40, 40)) { zrobZdjecieChem() },
+            Triple("🖼  Z galerii", Color.rgb(0, 121, 107)) { otworzGalerieSerii() },
+            Triple("Anuluj", szary) { zakonczSerie() }))
     }
 
     private fun zakonczSerie() {
@@ -1762,6 +1875,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         kartaCel = null
         dalejSerii = null
         zapisKarty = null
+        wrocWybor = null
     }
 
     private fun dodajDoSerii(f: File, pytaj: Boolean = true) {
@@ -1770,125 +1884,141 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         val z = ZdjSerii(kopia)
         seriaChem.add(z)
         ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
-        // napis czytany od razu w tle (substancje - każde zdjęcie, karta - pierwsze 2 strony)
+        // napis czytany od razu w tle (substancja - każde zdjęcie, karta - pierwsze 2 strony)
         if (trybSerii == 1 || (trybSerii == 3 && seriaChem.size <= 2)) czytajNapis(z) else z.gotowe = true
         if (pytaj) pytajSerie()
     }
 
     private fun czytajNapis(z: ZdjSerii) {
         watekKamery.execute {
-            val bmp = try { wczytajObraz({ z.plik.inputStream() }, 2000) } catch (e: Exception) { null }
-            if (bmp == null) { z.gotowe = true; return@execute }
-            rozpoznawanie.process(InputImage.fromBitmap(bmp, 0))
-                .addOnSuccessListener { w ->
-                    z.tekst = w.text
-                    z.nazwa = w.textBlocks.flatMap { it.lines }.filter { l -> l.text.count { it.isLetter() } >= 3 }
-                        .maxByOrNull { it.boundingBox?.height() ?: 0 }?.text?.trim() ?: ""
-                    z.gotowe = true
+            fun wynik(w: com.google.mlkit.vision.text.Text) {
+                z.tekst = w.text
+                z.nazwa = w.textBlocks.flatMap { it.lines }.filter { l -> l.text.count { it.isLetter() } >= 3 }
+                    .maxByOrNull { it.boundingBox?.height() ?: 0 }?.text?.trim() ?: ""
+            }
+            // 1. próba: pełne zdjęcie z pliku (ML Kit sam obraca wg EXIF); 2. próba: pomniejszona bitmapa
+            fun proba2() {
+                watekKamery.execute {
+                    val bmp = try { wczytajObraz({ z.plik.inputStream() }, 1600) } catch (e: Exception) { null }
+                    if (bmp == null) { z.gotowe = true; return@execute }
+                    rozpoznawanie.process(InputImage.fromBitmap(bmp, 0))
+                        .addOnSuccessListener { w -> wynik(w); z.gotowe = true }
+                        .addOnFailureListener { z.gotowe = true }
                 }
-                .addOnFailureListener { z.gotowe = true }
+            }
+            try {
+                rozpoznawanie.process(InputImage.fromFilePath(this, Uri.fromFile(z.plik)))
+                    .addOnSuccessListener { w -> wynik(w); if (z.tekst.isBlank()) proba2() else z.gotowe = true }
+                    .addOnFailureListener { proba2() }
+            } catch (e: Exception) { proba2() }
         }
     }
 
+    // po każdym zdjęciu: miniatury + kolejne / galeria / zakończ / usuń ostatnie
     private fun pytajSerie() {
         val n = seriaChem.size
         val karta = trybSerii != 1
-        AlertDialog.Builder(this)
-            .setTitle(if (karta) "Karta: zapisano stron $n" else "Zapisano zdjęć: $n")
-            .setMessage(if (karta) "Zrób zdjęcie następnej strony albo zakończ." else "Zrób kolejne zdjęcie albo zakończ - wtedy wybierzesz wydział.")
-            .setPositiveButton(if (karta) "Następna strona" else "Kolejne zdjęcie") { _, _ -> zrobZdjecieChem() }
-            .setNegativeButton("Koniec") { _, _ -> koniecSerii() }
-            .setNeutralButton("Galeria / usuń") { _, _ ->
-                AlertDialog.Builder(this)
-                    .setItems(arrayOf("\uD83D\uDDBC  Dodaj z galerii", "\u2716  Usuń ostatnie zdjęcie")) { _, i ->
-                        if (i == 0) otworzGalerieSerii() else {
-                            seriaChem.removeLastOrNull()?.plik?.delete()
-                            if (seriaChem.isEmpty()) zakonczSerie() else pytajSerie()
-                        }
-                    }
-                    .setOnCancelListener { pytajSerie() }
-                    .show()
-            }
-            .setCancelable(false)
-            .show()
+        val pas = LinearLayout(this)
+        pas.orientation = LinearLayout.HORIZONTAL
+        for (z in seriaChem) {
+            val iv = ImageView(this)
+            iv.scaleType = ImageView.ScaleType.CENTER_CROP
+            try { iv.setImageBitmap(wczytajObraz({ z.plik.inputStream() }, 300)) } catch (e: Exception) {}
+            val p = LinearLayout.LayoutParams(dp(84), dp(110))
+            p.rightMargin = dp(6)
+            pas.addView(iv, p)
+        }
+        val hs = HorizontalScrollView(this)
+        hs.addView(pas)
+        okno(if (karta) "Karta - stron: $n" else "Produkt - zdjęć: $n" + if (kodSerii != "-") "  ($kodSerii)" else "",
+            if (karta) "Następna strona tej samej karty albo zakończ." else "Kolejne zdjęcie TEGO SAMEGO produktu albo zakończ - zapisze się samo.",
+            hs, listOf(
+                Triple(if (karta) "📷  Następna strona" else "📷  Kolejne zdjęcie", Color.rgb(106, 27, 154)) { zrobZdjecieChem() },
+                Triple("🖼  Dodaj z galerii", Color.rgb(0, 121, 107)) { otworzGalerieSerii() },
+                Triple("✔  Zakończ - zapisz", zielony) { koniecSerii() },
+                Triple("✖  Usuń ostatnie", Color.rgb(120, 144, 156)) {
+                    seriaChem.removeLastOrNull()?.plik?.delete()
+                    if (seriaChem.isEmpty()) { if (karta) zakonczSerie() else zrodloSerii() } else pytajSerie()
+                }))
     }
 
     private fun koniecSerii() {
         if (seriaChem.isEmpty()) { zakonczSerie(); return }
         when (trybSerii) {
-            1 -> wybierzWydzialSerii()
+            1 -> zakonczProdukt()
             2 -> kartaCel?.let { zapiszStronyKarty(it) } ?: zakonczSerie()
             else -> rozpoznajKarte()
         }
     }
 
-    private fun wybierzWydzialSerii() {
-        // wszystkie wydziały (z komputera); stary spis bez nich - te ze spisu
-        val wsz = wszystkieWydzChem.ifEmpty { wydzialyChem.map { Pair(it, "") } }
-        val kody = wsz.map { it.first }
-        val opisy = wsz.map { if (it.second.isNotBlank()) it.first + "  -  " + it.second else it.first } +
-            "✎ inny wydział - wpiszę kod" + "— nie wiem / bez wydziału —"
-        AlertDialog.Builder(this)
-            .setTitle("Zdjęć: ${seriaChem.size} - z jakiego wydziału?")
-            .setItems(opisy.toTypedArray()) { _, i ->
-                nSeriiAuto = 0
-                nSeriiRecz = 0
-                if (i == kody.size) {
-                    val e = EditText(this)
-                    e.hint = "Kod wydziału, np. DH"
-                    e.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
-                    AlertDialog.Builder(this)
-                        .setTitle("Kod wydziału")
-                        .setView(e)
-                        .setPositiveButton("OK") { _, _ ->
-                            val k = e.text.toString().trim()
-                            if (k.isEmpty()) wybierzWydzialSerii() else przetworzSerie(k)
-                        }
-                        .setNegativeButton("Wróć") { _, _ -> wybierzWydzialSerii() }
-                        .setCancelable(false)
-                        .show()
-                } else przetworzSerie(if (i < kody.size) kody[i] else "-")
-            }
-            .setNegativeButton("Wróć") { _, _ -> pytajSerie() }
-            .setCancelable(false)
-            .show()
-    }
-
-    // po kolei: pewne rozpoznanie zapisuje samo, niepewne - pyta (ze zdjęciem)
-    private fun przetworzSerie(kod: String) {
-        val z = seriaChem.firstOrNull { !it.zrobione }
-        if (z == null) {
-            val razem = nSeriiAuto + nSeriiRecz
-            zakonczSerie()
-            AlertDialog.Builder(this)
-                .setTitle("Zapisano: $razem" + if (kod != "-") " (wydział $kod)" else "")
-                .setMessage((if (nSeriiAuto > 0) "Rozpoznane same: $nSeriiAuto\n" else "") + (if (nSeriiRecz > 0) "Wybrane ręcznie: $nSeriiRecz\n" else "") +
-                    "Komputer zabierze zdjęcia sam, gdy będzie otwarty Program BHP.")
-                .setPositiveButton("OK", null)
-                .show()
-            if (tryb == "CHEMIA") ustawWydzialyChem()
-            return
-        }
-        if (!z.gotowe) {
+    // wszystkie zdjęcia = jeden produkt: napis z wszystkich zdjęć -> produkt ze spisu (pewny - sam), inaczej jedno pytanie
+    private fun zakonczProdukt() {
+        if (!seriaChem.all { it.gotowe }) {
             Toast.makeText(this, "Czytam etykietę...", Toast.LENGTH_SHORT).show()
-            Handler(Looper.getMainLooper()).postDelayed({ przetworzSerie(kod) }, 600)
+            Handler(Looper.getMainLooper()).postDelayed({ zakonczProdukt() }, 600)
             return
         }
-        val kand = if (z.tekst.isNotBlank()) dopasujChem(z.tekst, kod) else emptyList()
-        val odczyt = if (z.tekst.isNotBlank()) odczytEtykiety(z.tekst) else ""
-        z.zrobione = true
+        val kod = kodSerii.ifBlank { "-" }
+        val tekst = seriaChem.joinToString("\n") { it.tekst }
+        val nazwa = seriaChem.map { it.nazwa }.firstOrNull { it.isNotBlank() } ?: ""
+        val kand = if (tekst.isNotBlank()) dopasujChem(tekst, kod) else emptyList()
+        val odczyt = if (tekst.isNotBlank()) odczytEtykiety(tekst) else ""
         val pewny = kand.isNotEmpty() && kand[0].third >= 1.0 && (kand.size < 2 || kand[1].third < 1.0)
         if (pewny) {
-            val k = kand[0]
-            val f = z.plik
-            zapiszZdjecieChem(Triple(k.first, kod, k.second), { f.inputStream() }, "E", odczyt) { f.delete() }
-            nSeriiAuto++
-            Toast.makeText(this, "✔ " + k.second, Toast.LENGTH_SHORT).show()
-            Handler(Looper.getMainLooper()).postDelayed({ przetworzSerie(kod) }, 400)
+            zapiszSerieProduktu(Triple(kand[0].first, kod, kand[0].second), odczyt)
             return
         }
-        dalejSerii = { Handler(Looper.getMainLooper()).postDelayed({ przetworzSerie(kod) }, 300) }
-        wyborProduktuChem(z.plik, kod, z.tekst, z.nazwa)
+        wyborProduktuSerii(kod, tekst, nazwa, odczyt, kand, false)
+    }
+
+    // wybór produktu (substancja albo karta) - nowoczesne okno z miniaturą
+    private fun wyborProduktuSerii(kod: String, tekst: String, nazwa: String, odczyt: String,
+                                   kand: List<Triple<Int, String, Double>>, karta: Boolean) {
+        val zapisz: (Triple<Int, String, String>) -> Unit = { cel ->
+            if (karta) zapiszStronyKarty(Triple(cel.first, cel.second.ifBlank { "-" }, cel.third)) else zapiszSerieProduktu(cel, odczyt)
+        }
+        zapisKarty = zapisz
+        wrocWybor = { wyborProduktuSerii(kod, tekst, nazwa, odczyt, kand, karta) }
+        val plik = seriaChem.first().plik
+        val iv = ImageView(this)
+        iv.adjustViewBounds = true
+        iv.maxHeight = dp(180)
+        try { iv.setImageBitmap(wczytajObraz({ plik.inputStream() }, 600)) } catch (e: Exception) {}
+        val przyc = mutableListOf<Triple<String, Int, () -> Unit>>()
+        for (k in kand) {
+            val jest = listaChem.any { it.id == k.first && it.kod == kod }
+            przyc.add(Triple((if (jest || kod == "-") "✔  " else "+  ") + k.second.take(40) + if (!jest && kod != "-") "  (dopisz do $kod)" else "",
+                Color.rgb(21, 101, 192)) { zapisz(Triple(k.first, kod, k.second)) })
+        }
+        przyc.add(Triple("🔎  Wybierz z całego spisu", Color.rgb(0, 121, 107)) { wybierzZeSpisuChem(plik, kod, odczyt) })
+        przyc.add(Triple("✎  Nowy produkt" + if (nazwa.isNotBlank()) ": " + nazwa.take(30) else "", Color.rgb(106, 27, 154)) { nowyProduktChem(plik, kod, nazwa, odczyt) })
+        if (!karta) przyc.add(Triple("⏳  Nie wiem - przypiszę na komputerze", pomaranczowy) { zapisz(Triple(-1, kod, nazwa)) })
+        przyc.add(Triple("✖  Usuń zdjęcia", Color.rgb(120, 144, 156)) { zakonczSerie() })
+        val tyt = when {
+            tekst.isBlank() -> "Nie odczytano napisu"
+            kand.isEmpty() -> "Nie ma w spisie"
+            else -> "Który to produkt?"
+        }
+        okno(tyt, (if (nazwa.isNotBlank()) "Odczytano: $nazwa\n" else "") + (if (odczyt.isNotBlank() && !karta) "Z etykiety: $odczyt" else ""), iv, przyc)
+    }
+
+    // zapis wszystkich zdjęć serii przy jednym produkcie
+    private fun zapiszSerieProduktu(cel: Triple<Int, String, String>, odczyt: String) {
+        val pliki = seriaChem.map { it.plik }.filter { it.exists() }
+        seriaChem.forEach { it.zrobione = true }
+        seriaChem.clear()
+        zapisKarty = null
+        wrocWybor = null
+        for (f in pliki) zapiszZdjecieChem(cel, { f.inputStream() }, "E", odczyt) { f.delete() }
+        val kod = cel.second
+        trybSerii = 0
+        val polacz = tloWidziane() || komputerWidziany()
+        okno("✔  Zapisano", (if (cel.first == -1) "Do przypisania na komputerze" else cel.third.ifBlank { "nowy produkt" }) +
+            "\nZdjęć: ${pliki.size}" + (if (kod != "-") ", wydział $kod" else "") +
+            "\n" + (if (polacz) "Program BHP otwarty - trafi do bazy za chwilę." else "Trafi do bazy sam, gdy otworzysz Program BHP."),
+            null, listOf(
+                Triple("📷  Następny produkt", Color.rgb(106, 27, 154)) { startSeriiSubstancji() },
+                Triple("Gotowe", szary) {}))
     }
 
     // karta znanego produktu - wszystkie strony jako jedna seria (komputer złoży je w PDF karty)
@@ -1896,34 +2026,31 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         val pliki = seriaChem.map { it.plik }.filter { it.exists() }
         val seria = System.currentTimeMillis().toString()
         val n = pliki.size
+        seriaChem.forEach { it.zrobione = true }
         seriaChem.clear()
         trybSerii = 0
         zapisKarty = null
+        wrocWybor = null
         pliki.forEachIndexed { i, f ->
             zapiszZdjecieChem(cel, { f.inputStream() }, "K", "SERIA:$seria STRONA:${i + 1}/$n") { f.delete() }
         }
-        AlertDialog.Builder(this)
-            .setTitle("Karta zapisana: " + cel.third.ifBlank { "nowy produkt" })
-            .setMessage("Stron: $n. Komputer złoży je w jeden plik karty charakterystyki i zapisze w bazie, gdy będzie otwarty Program BHP.")
-            .setPositiveButton("OK", null)
-            .show()
+        okno("✔  Karta zapisana", cel.third.ifBlank { "nowy produkt" } + "\nStron: $n - komputer złoży je w jeden plik karty i zapisze w bazie.",
+            null, listOf(Triple("OK", zielony) {}))
     }
 
     // karta bez wskazanego produktu - nazwa z 1. strony karty
     private fun rozpoznajKarte() {
-        val gotowe = seriaChem.take(2).all { it.gotowe }
-        if (!gotowe) {
+        if (!seriaChem.take(2).all { it.gotowe }) {
             Toast.makeText(this, "Czytam kartę...", Toast.LENGTH_SHORT).show()
             Handler(Looper.getMainLooper()).postDelayed({ rozpoznajKarte() }, 600)
             return
         }
         val tekst = seriaChem.take(2).joinToString("\n") { it.tekst }
-        // nazwa produktu: wiersz po "nazwa handlowa" / "identyfikator produktu", inaczej największy napis
         val m = Regex("""(?i)(nazwa handlowa|nazwa produktu|identyfikator produktu|product name)[^\n]*\n?\s*[:.-]?\s*([^\n]{3,60})""").find(tekst)
         val nazwa = m?.groupValues?.get(2)?.trim()?.trimStart(':', '-', ' ') ?: seriaChem.first().nazwa
-        val kod = if (trybChem == 1) wydzialChem() else ""
-        zapisKarty = { cel -> zapiszStronyKarty(Triple(cel.first, cel.second.ifBlank { "-" }, cel.third)) }
-        wyborProduktuChem(seriaChem.first().plik, kod.ifBlank { "-" }, tekst, nazwa)
+        val kod = (if (trybChem == 1) wydzialChem() else "").ifBlank { "-" }
+        val kand = if (tekst.isNotBlank()) dopasujChem(tekst, kod) else emptyList()
+        wyborProduktuSerii(kod, tekst, nazwa, "", kand, true)
     }
 
     // ------------------------------------------------------------------
