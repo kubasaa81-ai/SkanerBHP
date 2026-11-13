@@ -62,6 +62,8 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.concurrent.ExecutorService
@@ -133,27 +135,68 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         if (uris.isNotEmpty()) importujZdjecia(uris)
     }
     @Volatile private var sprawaZdj = ""
+    // sprawy wypadkowe z komputera (bez nazwisk - RODO): wypadki/sprawy.txt "WSL|wersja" + linie "id|opis"
+    private var sprawyWyp: List<Pair<Int, String>> = emptyList()
+    @Volatile private var wersjaSprawWyp = ""
+    private lateinit var spSprawaZdj: Spinner
+    private val aparatZdj = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        val f = plikAparatu
+        if (ok && f != null && f.exists()) {
+            val sp = sprawaWybranaZdj()
+            watekKamery.execute {
+                try {
+                    val bmp = wczytajObraz({ f.inputStream() }, 1600)
+                    if (bmp != null) {
+                        val nr = (plikiZdjec().maxOfOrNull { it.first } ?: 0) + 1
+                        FileOutputStream(File(folderZdj, "zdj_$nr.jpg")).use { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+                        File(folderZdj, "zdj_$nr.sp").writeText(sp.toString(), Charsets.UTF_8)
+                    }
+                } catch (e: Exception) {
+                }
+                f.delete()
+                runOnUiThread {
+                    pokazListeZdjec()
+                    AlertDialog.Builder(this)
+                        .setTitle("Zapisano zdjęcie")
+                        .setMessage("Opis możesz dopisać pod zdjęciem. Komputer zabierze zdjęcia sam, gdy Program BHP jest otwarty.")
+                        .setPositiveButton("Następne zdjęcie") { _, _ -> zrobZdjecieWyp() }
+                        .setNegativeButton("Koniec", null)
+                        .show()
+                }
+            }
+        }
+    }
+    private val prosbaKameraZdj = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) zrobZdjecieWyp() else Toast.makeText(this, "Bez zgody na aparat - wybierz zdjęcia z galerii", Toast.LENGTH_LONG).show()
+    }
     private val folderZdj: File by lazy { File(filesDir, "zdjecia").apply { mkdirs() } }
 
     // etykiety chemii: lista z komputera (chemia/lista.txt), zdjęcia chemia/ch_<nr>.jpg + ch_<nr>.txt ("id|kod|nazwa")
-    private class ProdChem(val id: Int, val kod: String, val doUst: Boolean, val nazwa: String, val producent: String, val miejsce: String)
+    private class ProdChem(val id: Int, val kod: String, val doUst: Boolean, val nazwa: String, val producent: String, val miejsce: String, val stan: String = "")
     private var listaChem: List<ProdChem> = emptyList()
     @Volatile private var dataListyChem = ""
+    @Volatile private var wersjaListyChem = ""
+    @Volatile private var ostatnieTlo = 0L                 // ostatnie odpytanie w tle (GET /stan) - Program BHP otwarty
+    private lateinit var tWynikiChem: TextView
+    private var filtrChem = 0                               // 0 do ustalenia, 1 brak karty, 2 wszystkie
+    private val rozpoznawanie by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
     private val folderChem: File by lazy { File(filesDir, "chemia").apply { mkdirs() } }
     private lateinit var tKomputerChem: TextView
     private lateinit var tStanChem: TextView
     private lateinit var spWydzChem: Spinner
     private lateinit var bWszystkieChem: Button
     private lateinit var listaChemWidok: LinearLayout
-    private var wszystkieChem = false
     private var wydzialyChem: List<String> = emptyList()
-    private var celZdjecia: Triple<Int, String, String>? = null      // id produktu (0 = spoza listy), kod wydziału, nazwa
+    private var celZdjecia: Triple<Int, String, String>? = null      // id produktu (0 = spoza listy, -1 do przypisania, -2 rozpoznaj), kod wydziału, nazwa
+    private var typZdjeciaChem = "E"                                  // E etykieta, K karta charakterystyki (papier na wydziale)
     private var plikAparatu: File? = null
     private val aparatChem = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
         val f = plikAparatu
         val cel = celZdjecia
-        if (ok && f != null && f.exists() && cel != null) {
-            zapiszZdjecieChem(cel, { f.inputStream() }) { f.delete() }
+        if (ok && f != null && f.exists() && cel != null && cel.first == -2) {
+            rozpoznajZdjecieChem(f, cel.second)
+        } else if (ok && f != null && f.exists() && cel != null) {
+            zapiszZdjecieChem(cel, { f.inputStream() }, typZdjeciaChem) { f.delete() }
             if (cel.first == -1) {
                 AlertDialog.Builder(this)
                     .setTitle("Zapisano zdjęcie (wydział ${cel.second})")
@@ -165,7 +208,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     }
     private val galeriaChem = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(10)) { uris ->
         val cel = celZdjecia
-        if (cel != null) for (u in uris) zapiszZdjecieChem(cel, { contentResolver.openInputStream(u) }) {}
+        if (cel != null && cel.first != -2) for (u in uris) zapiszZdjecieChem(cel, { contentResolver.openInputStream(u) }, typZdjeciaChem) {}
     }
     private val prosbaKameraChem = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         if (ok) zrobZdjecieChem() else Toast.makeText(this, "Bez zgody na aparat - wybierz zdjęcie z galerii", Toast.LENGTH_LONG).show()
@@ -177,6 +220,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private var zrodlaM: List<ZrodloM> = emptyList()
     private var kartotekaM: List<MaszynaK> = emptyList()
     @Volatile private var dataListyM = ""
+    @Volatile private var wersjaListyM = ""
     private val folderMasz: File by lazy { File(filesDir, "maszyny").apply { mkdirs() } }
     private lateinit var tKomputerMasz: TextView
     private lateinit var tStanMasz: TextView
@@ -526,6 +570,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     }
 
     private fun komputerWidziany(): Boolean = ostatniKontakt > 0 && SystemClock.elapsedRealtime() - ostatniKontakt < 5000
+    // Program BHP otwarty na komputerze (odpytuje w tle co kilkanaście sekund)
+    private fun tloWidziane(): Boolean = ostatnieTlo > 0 && SystemClock.elapsedRealtime() - ostatnieTlo < 75000
 
     private fun pokazStan() {
         val vpn = vpnWlaczony()
@@ -559,29 +605,30 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         }
         if (::tKomputerZdj.isInitialized) {
             tKomputerZdj.text = when {
-                !vpn -> "GlobalProtect wyłączony - zdjęcia czekają w telefonie, komputer pobierze je później"
-                komputerWidziany() -> "\u2714 Komputer połączony ($adresKomputera)"
-                else -> "Komputer pobierze zdjęcia: Oględziny -> \"Z telefonu\""
+                !vpn -> "GlobalProtect wyłączony - zdjęcia czekają w telefonie, komputer zabierze je później"
+                tloWidziane() || komputerWidziany() -> "\u2714 Program BHP otwarty - zdjęcia same idą do sprawy"
+                else -> "Program BHP zamknięty - zdjęcia czekają w telefonie, pójdą same po jego otwarciu"
             }
-            tKomputerZdj.setTextColor(if (vpn && komputerWidziany()) zielony else szary)
+            tKomputerZdj.setTextColor(if (vpn && (tloWidziane() || komputerWidziany())) zielony else szary)
         }
         if (::tKomputerMasz.isInitialized) {
             tKomputerMasz.text = when {
-                zrodlaM.isEmpty() -> "Brak listy - w komputerze: Pomiary -> Maszyny w pomiarach -> \"Lista na telefon\""
+                zrodlaM.isEmpty() -> "Brak listy - otwórz Program BHP na komputerze (lista przyjdzie sama)"
                 !vpn -> "Lista z $dataListyM - przypisania czekają w telefonie, komputer pobierze je później"
-                komputerWidziany() -> "\u2714 Komputer połączony ($adresKomputera)  -  lista z $dataListyM"
-                else -> "Lista z $dataListyM - komputer pobierze: Maszyny w pomiarach -> \"Połączenia z telefonu\""
+                tloWidziane() || komputerWidziany() -> "\u2714 Program BHP otwarty - połączenia idą do bazy same  (lista z $dataListyM)"
+                else -> "Lista z $dataListyM - Program BHP zamknięty: połączenia czekają, pójdą same po jego otwarciu"
             }
-            tKomputerMasz.setTextColor(if (zrodlaM.isEmpty()) pomaranczowy else if (vpn && komputerWidziany()) zielony else szary)
+            tKomputerMasz.setTextColor(if (zrodlaM.isEmpty()) pomaranczowy else if (vpn && (tloWidziane() || komputerWidziany())) zielony else szary)
         }
         if (::tKomputerChem.isInitialized) {
             tKomputerChem.text = when {
-                listaChem.isEmpty() -> "Brak spisu - w komputerze: Spis substancji -> \"Lista na telefon\""
-                !vpn -> "Spis z $dataListyChem (${listaChem.size} poz.) - zdjęcia czekają w telefonie, komputer pobierze je później"
-                komputerWidziany() -> "\u2714 Komputer połączony ($adresKomputera)  -  spis z $dataListyChem"
-                else -> "Spis z $dataListyChem - komputer pobierze zdjęcia: Spis substancji -> \"Zdjęcia z telefonu\""
+                listaChem.isEmpty() && (tloWidziane() || komputerWidziany()) -> "Program BHP otwarty - spis za chwilę przyjdzie sam"
+                listaChem.isEmpty() -> "Brak spisu - otwórz Program BHP na komputerze (spis przyjdzie sam)"
+                !vpn -> "Spis z $dataListyChem (${listaChem.size} poz.) - zdjęcia czekają w telefonie, pójdą same po włączeniu GlobalProtect"
+                tloWidziane() || komputerWidziany() -> "\u2714 Program BHP otwarty - zdjęcia idą do bazy na bieżąco  (spis z $dataListyChem)"
+                else -> "Spis z $dataListyChem - Program BHP zamknięty: zdjęcia czekają, pójdą same po jego otwarciu"
             }
-            tKomputerChem.setTextColor(if (listaChem.isEmpty()) pomaranczowy else if (vpn && komputerWidziany()) zielony else szary)
+            tKomputerChem.setTextColor(if (listaChem.isEmpty()) pomaranczowy else if (vpn && (tloWidziane() || komputerWidziany())) zielony else szary)
         }
         if (::tKomputerMag.isInitialized) {
             tKomputerMag.text = when {
@@ -693,10 +740,20 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         tKomputerZdj.setPadding(0, dp(2), 0, dp(6))
         ekranZdj.addView(tKomputerZdj)
 
-        bGaleria = przycisk("Wybierz zdjęcia z galerii", czerwony, 20f) {
+        val ws = wiersz()
+        ws.addView(tekst("Sprawa: ", 16f, szary, true))
+        spSprawaZdj = Spinner(this)
+        ws.addView(spSprawaZdj, lp(1f))
+        ekranZdj.addView(ws)
+
+        val wz = wiersz()
+        wz.addView(przycisk("\uD83D\uDCF7  Zrób zdjęcie", czerwony, 18f) { zrobZdjecieWyp() }, lp(1f))
+        bGaleria = przycisk("Z galerii", Color.rgb(121, 85, 72), 16f) {
             wyborZdjec.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
         }
-        ekranZdj.addView(bGaleria, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(64)))
+        wz.addView(bGaleria, lp(0.6f, 6))
+        ekranZdj.addView(wz, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(64)))
+        wczytajSprawyWypZPliku()
 
         tStanZdj = tekst("", 15f, szary, true)
         tStanZdj.gravity = Gravity.CENTER
@@ -718,7 +775,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         zatrzymajKamere()
         tryb = "ZDJECIA"
         setContentView(ekranZdj)
-        tSprawaZdj.text = if (sprawaZdj.isNotBlank()) sprawaZdj else "Zdjęcia trafią do sprawy otwartej w komputerze"
+        tSprawaZdj.text = if (sprawaZdj.isNotBlank()) sprawaZdj else ""
+        ustawSprawyWyp()
         pokazListeZdjec()
         pokazStan()
     }
@@ -782,6 +840,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         bGaleria.isEnabled = false
         tStanZdj.text = "Kopiuję zdjęcia (${uris.size}) ..."
         tStanZdj.setTextColor(niebieski)
+        val spr = sprawaWybranaZdj()
         watekKamery.execute {
             var ok = 0
             for (u in uris) {
@@ -789,6 +848,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                     val bmp = wczytajObraz({ contentResolver.openInputStream(u) }, 1600) ?: continue
                     val nr = (plikiZdjec().maxOfOrNull { it.first } ?: 0) + 1
                     FileOutputStream(File(folderZdj, "zdj_$nr.jpg")).use { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+                    File(folderZdj, "zdj_$nr.sp").writeText(spr.toString(), Charsets.UTF_8)
                     ok++
                 } catch (e: Exception) {
                 }
@@ -841,7 +901,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             wb.addView(przycisk("Usuń", Color.rgb(121, 85, 72), 13f) {
                 AlertDialog.Builder(this)
                     .setTitle("Usunąć to zdjęcie z aplikacji?")
-                    .setMessage("Zdjęcie w galerii telefonu zostaje.")
+                    .setMessage("Komputer go nie dostanie.")
                     .setPositiveButton("Usuń") { _, _ -> usunZdjecie(nr); pokazListeZdjec() }
                     .setNegativeButton("Nie", null)
                     .show()
@@ -870,6 +930,65 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private fun usunZdjecie(nr: Int) {
         File(folderZdj, "zdj_$nr.jpg").delete()
         File(folderZdj, "zdj_$nr.txt").delete()
+        File(folderZdj, "zdj_$nr.sp").delete()
+    }
+
+    private fun sprawaZdjecia(nr: Int): Int {
+        val t = File(folderZdj, "zdj_$nr.sp")
+        return if (t.exists()) t.readText(Charsets.UTF_8).trim().toIntOrNull() ?: 0 else 0
+    }
+
+    private fun sprawaWybranaZdj(): Int {
+        if (!::spSprawaZdj.isInitialized) return 0
+        val i = spSprawaZdj.selectedItemPosition - 1
+        return if (i in sprawyWyp.indices) sprawyWyp[i].first else 0
+    }
+
+    private fun wczytajSprawyWypZPliku() {
+        val f = File(folderZdj, "sprawy.txt")
+        if (f.exists()) try { przetworzSprawyWyp(f.readText(Charsets.UTF_8)) } catch (e: Exception) {}
+    }
+
+    private fun przetworzSprawyWyp(tekst: String) {
+        val linie = tekst.replace("\r", "").split("\n")
+        if (linie.isEmpty() || !linie[0].startsWith("WSL|")) return
+        sprawyWyp = linie.drop(1).mapNotNull { l ->
+            val p = l.split("|", limit = 2)
+            val id = p[0].trim().toIntOrNull() ?: return@mapNotNull null
+            Pair(id, polskie(p.getOrElse(1) { "" }.trim()))
+        }
+        wersjaSprawWyp = linie[0].substringAfter("|").trim()
+    }
+
+    private fun ustawSprawyWyp() {
+        if (!::spSprawaZdj.isInitialized) return
+        val stary = sprawaWybranaZdj()
+        val opisy = listOf("(wybiorę na komputerze)") + sprawyWyp.map { it.second }
+        spSprawaZdj.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, opisy)
+        val i = sprawyWyp.indexOfFirst { it.first == stary }
+        spSprawaZdj.setSelection(if (i >= 0) i + 1 else if (sprawyWyp.size == 1) 1 else 0)
+    }
+
+    // serwer: POST /zdjecia_sprawy "WSL|wersja" + linie "id|opis"
+    override fun zdjeciaSprawy(tekst: String) {
+        try { File(folderZdj, "sprawy.txt").writeText(tekst, Charsets.UTF_8) } catch (e: Exception) {}
+        przetworzSprawyWyp(tekst)
+        runOnUiThread { ustawSprawyWyp() }
+    }
+
+    private fun zrobZdjecieWyp() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            prosbaKameraZdj.launch(Manifest.permission.CAMERA)
+            return
+        }
+        try {
+            val f = File(cacheDir, "aparat_wypadek.jpg")
+            if (f.exists()) f.delete()
+            plikAparatu = f
+            aparatZdj.launch(FileProvider.getUriForFile(this, "$packageName.pliki", f))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Nie udało się otworzyć aparatu: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun usunWszystkieZdjecia() {
@@ -877,7 +996,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         if (n == 0) return
         AlertDialog.Builder(this)
             .setTitle("Usunąć wszystkie zdjęcia z aplikacji ($n)?")
-            .setMessage("Komputer ich już nie pobierze. Zdjęcia w galerii telefonu zostają.")
+            .setMessage("Komputer ich już nie dostanie.")
             .setPositiveButton("Usuń") { _, _ -> plikiZdjec().forEach { usunZdjecie(it.first) }; pokazListeZdjec() }
             .setNegativeButton("Nie", null)
             .show()
@@ -901,7 +1020,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
 
     override fun zdjecia(): String {
         val l = plikiZdjec()
-        return "ZDJ|" + l.size + l.joinToString("") { "\n${it.first}|" + naKomputer(opisZdjecia(it.first)) }
+        return "ZDJ|" + l.size + l.joinToString("") { "\n${it.first}|" + naKomputer(opisZdjecia(it.first)) + "|" + sprawaZdjecia(it.first) }
     }
 
     override fun zdjecie(nr: Int): ByteArray? {
@@ -917,7 +1036,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         runOnUiThread {
             pokazListeZdjec()
             if (tryb == "ZDJECIA") {
-                tStanZdj.text = "\u2714 Komputer pobrał zdjęcia - " + tStanZdj.text
+                tStanZdj.text = "\u2714 Komputer zabrał zdjęcia do sprawy - " + tStanZdj.text
                 ton?.startTone(ToneGenerator.TONE_PROP_BEEP2, 300)
             }
         }
@@ -973,8 +1092,11 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
 
     // ------------------------------------------------------------------
     //  ETYKIETY CHEMII
-    //  POST /chemia:  "CHL|data" + linie "id|kod|1/0 do ustalenia|nazwa|producent|miejsce"  (~a = ą ...)
-    //  GET /chemia_zdjecia -> "CHZ|n" + linie "nr|id|kod|nazwa";  GET /chemia_zdjecie?nr=N;  POST /chemia_odebrane "nr,nr"
+    //  POST /chemia:  "CHL|data|wersja" + linie "id|kod|1/0 do ustalenia|nazwa|producent|miejsce|stan karty"  (~a = ą ...)
+    //                 kod "-" = produkt bez wydziału (tylko do rozpoznawania zdjęć)
+    //  GET /chemia_zdjecia -> "CHZ|n" + linie "nr|id|kod|nazwa|typ E/K|odczyt z etykiety";  GET /chemia_zdjecie?nr=N;
+    //  POST /chemia_odebrane "nr,nr";  POST /chemia_wyniki - linie "tekst" (co komputer zrobił ze zdjęciami)
+    //  Program BHP otwarty odpytuje w tle GET /stan i sam wysyła spis / zabiera zdjęcia.
     // ------------------------------------------------------------------
     private fun zbudujChemie() {
         ekranChem = LinearLayout(this)
@@ -996,8 +1118,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         w2.addView(tekst("Wydział: ", 16f, szary, true))
         spWydzChem = Spinner(this)
         w2.addView(spWydzChem, lp(1f))
-        bWszystkieChem = przycisk("Tylko do ustalenia", pomaranczowy, 13f) {
-            wszystkieChem = !wszystkieChem
+        bWszystkieChem = przycisk("Pokaż: do ustalenia", pomaranczowy, 13f) {
+            filtrChem = (filtrChem + 1) % 3
             pokazListeChem()
         }
         w2.addView(bWszystkieChem, lp(1f, 6))
@@ -1009,8 +1131,12 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
 
         tStanChem = tekst("", 14f, szary, true)
         tStanChem.gravity = Gravity.CENTER
-        tStanChem.setPadding(0, dp(6), 0, dp(6))
+        tStanChem.setPadding(0, dp(6), 0, dp(2))
         ekranChem.addView(tStanChem)
+        tWynikiChem = tekst("", 13f, zielony)
+        tWynikiChem.setPadding(0, 0, 0, dp(4))
+        tWynikiChem.setOnClickListener { pokazWynikiChem() }
+        ekranChem.addView(tWynikiChem)
 
         val przew = ScrollView(this)
         listaChemWidok = LinearLayout(this)
@@ -1018,11 +1144,16 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         przew.addView(listaChemWidok)
         ekranChem.addView(przew, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
+        ekranChem.addView(przycisk("\uD83D\uDCF7  Zdjęcie etykiety - telefon rozpozna produkt", fiolet, 17f) { zdjecieRozpoznaj() },
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(60)))
         val w3 = wiersz()
-        w3.addView(przycisk("+ Produkt spoza spisu", fiolet, 15f) { produktSpozaListy() }, lp(1f))
+        w3.addView(przycisk("+ Spoza spisu (wpiszę nazwę)", Color.rgb(74, 20, 140), 14f) { produktSpozaListy() }, lp(1f))
         w3.addView(przycisk("Zdjęcia wydziału\n(przypiszemy później)", Color.rgb(0, 121, 107), 14f) { zdjeciaWydzialu() }, lp(1f, 6))
-        ekranChem.addView(w3, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(64)))
+        val lpW3 = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(60))
+        lpW3.topMargin = dp(6)
+        ekranChem.addView(w3, lpW3)
         wczytajListeChemZPliku()
+        pokazOstatnieWynikiChem()
     }
 
     private fun pokazChemie() {
@@ -1047,10 +1178,12 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             if (p.size < 4) continue
             val id = p[0].trim().toIntOrNull() ?: continue
             nowa.add(ProdChem(id, polskie(p[1].trim()), p[2].trim() == "1", polskie(p[3].trim()),
-                polskie(p.getOrElse(4) { "" }.trim()), polskie(p.getOrElse(5) { "" }.trim())))
+                polskie(p.getOrElse(4) { "" }.trim()), polskie(p.getOrElse(5) { "" }.trim()), polskie(p.getOrElse(6) { "" }.trim())))
         }
         listaChem = nowa
-        dataListyChem = linie[0].substringAfter("|").trim()
+        val n = linie[0].split("|")
+        dataListyChem = n.getOrElse(1) { "" }.trim()
+        wersjaListyChem = n.getOrElse(2) { "" }.trim()
     }
 
     // serwer: POST /chemia
@@ -1059,17 +1192,17 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         przetworzListeChem(tekst)
         runOnUiThread {
             if (tryb == "CHEMIA") ustawWydzialyChem()
-            Toast.makeText(this, "Spis substancji z komputera: ${listaChem.size} poz.", Toast.LENGTH_SHORT).show()
-            ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
+            if (tryb == "CHEMIA") Toast.makeText(this, "Spis substancji z komputera zaktualizowany", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun ustawWydzialyChem() {
         val stary = spWydzChem.selectedItem?.toString()
-        wydzialyChem = listaChem.map { it.kod }.distinct().sorted()
+        wydzialyChem = listaChem.map { it.kod }.filter { it != "-" && it.isNotBlank() }.distinct().sorted()
         val opisy = wydzialyChem.map { k ->
             val n = listaChem.count { it.kod == k && it.doUst && liczbaZdjecChem(it.id, k) == 0 }
-            if (n > 0) "$k  ($n do ustalenia)" else k
+            val b = listaChem.count { it.kod == k && brakKarty(it) }
+            k + (if (n > 0) "  ($n do ustalenia" + (if (b > 0) ", $b bez karty)" else ")") else if (b > 0) "  ($b bez karty)" else "")
         }
         spWydzChem.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, opisy)
         val i = if (stary != null) opisy.indexOfFirst { it.substringBefore(" ") == stary.substringBefore(" ") } else -1
@@ -1091,7 +1224,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
 
     private fun opisZdjeciaChem(nr: Int): List<String> {
         val t = File(folderChem, "ch_$nr.txt")
-        return if (t.exists()) t.readText(Charsets.UTF_8).split("|", limit = 3) else listOf("0", "", "")
+        return if (t.exists()) t.readText(Charsets.UTF_8).split("|", limit = 5) else listOf("0", "", "", "E", "")
     }
 
     private fun liczbaZdjecChem(id: Int, kod: String): Int = zdjeciaChem().count {
@@ -1108,17 +1241,21 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private fun pokazListeChem() {
         if (!::listaChemWidok.isInitialized) return
         listaChemWidok.removeAllViews()
-        bWszystkieChem.text = if (wszystkieChem) "Pokaż: wszystkie" else "Pokaż: do ustalenia"
+        bWszystkieChem.text = when (filtrChem) { 0 -> "Pokaż: do ustalenia"; 1 -> "Pokaż: brak karty"; else -> "Pokaż: wszystkie" }
         val kod = wydzialChem()
         val wysl = wyslaneChem()
-        val lista = listaChem.filter { it.kod == kod && (wszystkieChem || it.doUst) }.sortedWith(compareBy({ !it.doUst }, { it.nazwa.lowercase() }))
+        val lista = listaChem.filter { it.kod == kod && when (filtrChem) { 0 -> it.doUst; 1 -> brakKarty(it); else -> true } }
+            .sortedWith(compareBy({ !it.doUst }, { it.nazwa.lowercase() }))
         val czeka = zdjeciaChem().size
         val wydz = zdjeciaChem().count { val o = opisZdjeciaChem(it.first); o.getOrNull(0) == "-1" && o.getOrNull(1) == kod }
         tStanChem.text = (if (wydz > 0) "Zdjęcia wydziału do przypisania: $wydz\n" else "") + when {
-            listaChem.isEmpty() -> "Najpierw w komputerze: Spis substancji -> \"Lista na telefon\""
-            lista.isEmpty() -> "Na tym wydziale nie ma produktów do ustalenia" + if (czeka > 0) "   |   zdjęć do wysłania: $czeka" else ""
-            else -> "Dotknij produktu = zdjęcie etykiety" + if (czeka > 0) "   |   zdjęć do wysłania: $czeka" else ""
-        }
+            listaChem.isEmpty() -> "Spis przyjdzie sam, gdy na komputerze będzie otwarty Program BHP"
+            lista.isEmpty() && filtrChem == 0 -> "Na tym wydziale nie ma produktów do ustalenia"
+            lista.isEmpty() && filtrChem == 1 -> "Na tym wydziale wszystkie karty są w porządku"
+            lista.isEmpty() -> "Na tym wydziale nie ma produktów w spisie"
+            filtrChem == 1 -> "Brak / nieaktualna karta - dotknij, gdy znajdziesz kartę na wydziale"
+            else -> "Dotknij produktu = zdjęcie etykiety"
+        } + if (czeka > 0) "   |   zdjęć czeka na komputer: $czeka" else ""
         tStanChem.setTextColor(if (czeka > 0) pomaranczowy else szary)
         for (p in lista) {
             val n = liczbaZdjecChem(p.id, p.kod)
@@ -1132,20 +1269,21 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             tlo.setStroke(dp(2), when {
                 n > 0 -> zielony
                 bylo -> niebieski
-                p.doUst -> pomaranczowy
+                p.doUst || brakKarty(p) -> pomaranczowy
                 else -> Color.rgb(207, 216, 220)
             })
             ramka.background = tlo
             ramka.addView(tekst(p.nazwa, 16f, Color.rgb(38, 50, 56), true))
-            val opis = listOf(p.producent, p.miejsce).filter { it.isNotBlank() }.joinToString("  |  ")
+            val opis = listOf(p.producent, p.miejsce, if (brakKarty(p)) "karta: " + p.stan.lowercase() else "").filter { it.isNotBlank() }.joinToString("  |  ")
             if (opis.isNotBlank()) ramka.addView(tekst(opis, 13f, szary))
             val stan = when {
                 n > 0 -> "📷 zdjęć: $n - czekają na komputer"
                 bylo -> "✔ zdjęcie wysłane do komputera"
                 p.doUst -> "DO USTALENIA - zrób zdjęcie etykiety (piktogramy, hasło, zwroty H)"
+                brakKarty(p) -> "BEZ KARTY w BHP - jeśli karta jest na wydziale, zrób jej zdjęcie"
                 else -> "klasyfikacja ustalona"
             }
-            ramka.addView(tekst(stan, 13f, if (n > 0) zielony else if (bylo) niebieski else if (p.doUst) pomaranczowy else szary, true))
+            ramka.addView(tekst(stan, 13f, if (n > 0) zielony else if (bylo) niebieski else if (p.doUst || brakKarty(p)) pomaranczowy else szary, true))
             ramka.setOnClickListener { menuProduktuChem(p.id, p.kod, p.nazwa) }
             val lpR = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             lpR.topMargin = dp(6)
@@ -1156,7 +1294,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private fun menuProduktuChem(id: Int, kod: String, nazwa: String) {
         celZdjecia = Triple(id, kod, nazwa)
         val n = liczbaZdjecChem(id, kod)
-        val opcje = mutableListOf("Zrób zdjęcie etykiety", "Wybierz z galerii")
+        val opcje = mutableListOf("Zrób zdjęcie etykiety", "Zdjęcie karty charakterystyki (papier na wydziale)", "Wybierz z galerii")
         if (n > 0) {
             opcje.add("Podgląd zdjęć ($n)")
             opcje.add("Usuń zdjęcia tego produktu ($n)")
@@ -1165,8 +1303,9 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             .setTitle(nazwa)
             .setItems(opcje.toTypedArray()) { _, k ->
                 when (opcje[k]) {
-                    "Zrób zdjęcie etykiety" -> zrobZdjecieChem()
-                    "Wybierz z galerii" -> galeriaChem.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    "Zrób zdjęcie etykiety" -> { typZdjeciaChem = "E"; zrobZdjecieChem() }
+                    "Zdjęcie karty charakterystyki (papier na wydziale)" -> { typZdjeciaChem = "K"; zrobZdjecieChem() }
+                    "Wybierz z galerii" -> { typZdjeciaChem = "E"; galeriaChem.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
                     else -> if (opcje[k].startsWith("Podgląd")) podgladZdjecChem(id, kod) else {
                         zdjeciaChem().filter { val o = opisZdjeciaChem(it.first); o.getOrNull(0) == id.toString() && o.getOrNull(1) == kod }
                             .forEach { usunZdjecieChem(it.first) }
@@ -1193,6 +1332,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                     Toast.makeText(this, "Wpisz nazwę produktu", Toast.LENGTH_LONG).show()
                 } else {
                     celZdjecia = Triple(0, kod, n)
+                    typZdjeciaChem = "E"
                     zrobZdjecieChem()
                 }
             }
@@ -1216,14 +1356,272 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             .setView(e)
             .setPositiveButton("Aparat") { _, _ ->
                 celZdjecia = Triple(-1, kod, e.text.toString().trim())
+                typZdjeciaChem = "E"
                 zrobZdjecieChem()
             }
             .setNeutralButton("Z galerii") { _, _ ->
                 celZdjecia = Triple(-1, kod, e.text.toString().trim())
+                typZdjeciaChem = "E"
                 galeriaChem.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
             }
             .setNegativeButton("Anuluj", null)
             .show()
+    }
+
+    // karta do zdobycia (stan z komputera)
+    private fun brakKarty(p: ProdChem): Boolean =
+        p.stan in setOf("BRAK KARTY", "BRAK KOPII", "NIE PO POLSKU", "STARY WZÓR", "DO WERYFIKACJI", "SPRAWDŹ KARTĘ")
+
+    // ------------------------------------------------------------------
+    //  ROZPOZNAWANIE ETYKIETY (napis z etykiety -> produkt ze spisu)
+    // ------------------------------------------------------------------
+    private fun zdjecieRozpoznaj() {
+        val kod = wydzialChem()
+        if (kod.isEmpty()) {
+            Toast.makeText(this, "Najpierw wybierz wydział (spis przychodzi z komputera sam)", Toast.LENGTH_LONG).show()
+            return
+        }
+        celZdjecia = Triple(-2, kod, "")
+        typZdjeciaChem = "E"
+        zrobZdjecieChem()
+    }
+
+    private fun normCh(t: String): String {
+        val z = "ąćęłńóśźżäöüéè"
+        val na = "acelnoszzaouee"
+        val b = StringBuilder(" ")
+        for (c0 in t.lowercase()) {
+            val k = z.indexOf(c0)
+            val c = if (k >= 0) na[k] else c0
+            b.append(if (c in 'a'..'z' || c in '0'..'9') c else ' ')
+        }
+        b.append(' ')
+        return b.toString().replace(Regex(" +"), " ")
+    }
+
+    private val slowaPomijaneCh = setOf("karta", "preparat", "srodek", "plyn", "spray", "aerozol", "rozpylacz", "czysty", "czysta",
+        "olej", "farba", "nowy", "plus", "extra", "super", "color", "liquid", "conc", "pod", "nad", "przy", "oraz", "dla")
+
+    // [id, nazwa, wynik] najlepiej pasujących produktów ze spisu
+    private fun dopasujChem(tekst: String, kod: String): List<Triple<Int, String, Double>> {
+        val hay = normCh(tekst)
+        val wyn = mutableListOf<Triple<Int, String, Double>>()
+        for (p in listaChem.distinctBy { it.id }) {
+            var nm = p.nazwa
+            var opis = ""
+            val i = nm.indexOf(" - ")
+            if (i > 3) { opis = normCh(nm.substring(i + 3)); nm = nm.substring(0, i) }
+            val j = nm.indexOf(" (")
+            if (j > 3) nm = nm.substring(0, j)
+            val n = normCh(nm)
+            var w = 0.0
+            if (n.trim().length > 4 && hay.contains(n)) {
+                w = 1.0 + n.length / 1000.0
+            } else {
+                val sl = n.trim().split(" ").filter { it.length >= 4 && it !in slowaPomijaneCh }
+                if (sl.isNotEmpty()) {
+                    val t = sl.count { hay.contains(" $it ") }
+                    w = t.toDouble() / sl.size
+                    if (sl.size == 1 && w > 0) w = 0.7
+                }
+            }
+            if (w < 0.95 && opis.trim().length > 12 && hay.contains(opis)) w = 0.95
+            if (w > 0 && listaChem.any { it.id == p.id && it.kod == kod }) w += 0.1
+            if (w >= 0.5) wyn.add(Triple(p.id, p.nazwa, w))
+        }
+        return wyn.sortedByDescending { it.third }.take(4)
+    }
+
+    // zwroty H z kodów i z polskich zdań na etykiecie, hasło ostrzegawcze
+    private fun odczytEtykiety(tekst: String): String {
+        val kody = linkedSetOf<String>()
+        Regex("\\b(EUH\\s?\\d{3}|H\\s?[2-4]\\d{2})\\b").findAll(tekst.uppercase()).forEach { kody.add(it.value.replace(" ", "")) }
+        val n = normCh(tekst)
+        val zdania = listOf(
+            "skrajnie latwopalny aerozol" to "H222", "latwopalny aerozol" to "H223", "pojemnik pod cisnieniem" to "H229",
+            "skrajnie latwopalna ciecz" to "H224", "wysoce latwopalna ciecz" to "H225", "latwopalna ciecz i pary" to "H226",
+            "dzialaja szkodliwie po polknieciu" to "H302", "dziala szkodliwie po polknieciu" to "H302",
+            "moze grozic smiercia" to "H304", "dziala drazniaco na skore" to "H315", "reakcje alergiczna skory" to "H317",
+            "powoduje powazne uszkodzenie oczu" to "H318", "dziala drazniaco na oczy" to "H319",
+            "powoduje powazne oparzenia skory" to "H314", "podraznienie drog oddechowych" to "H335",
+            "uczucie sennosci" to "H336", "bardzo toksycznie na organizmy wodne powodujac dlugotrwale" to "H410",
+            "toksycznie na organizmy wodne powodujac dlugotrwale" to "H411", "szkodliwie na organizmy wodne powodujac dlugotrwale" to "H412",
+            "wysuszanie lub pekanie skory" to "EUH066", "moze wywolac reakcje alergiczna" to "EUH208")
+        for ((z, k) in zdania) if (n.contains(z)) {
+            if (k == "H411" && kody.contains("H410")) continue
+            if (k == "H412" && (kody.contains("H410") || kody.contains("H411"))) continue
+            if (k == "H226" && (kody.contains("H225") || kody.contains("H224"))) continue
+            kody.add(k)
+        }
+        val haslo = when {
+            n.contains(" niebezpieczenstwo ") || n.contains(" danger ") || n.contains(" gefahr ") -> "Niebezpieczeństwo"
+            n.contains(" uwaga ") || n.contains(" warning ") || n.contains(" achtung ") -> "Uwaga"
+            else -> ""
+        }
+        return listOf(kody.sorted().joinToString(", "), haslo).filter { it.isNotBlank() }.joinToString("; ")
+    }
+
+    private fun rozpoznajZdjecieChem(f: File, kod: String) {
+        val kopia = File(cacheDir, "rozpoznaj_${System.currentTimeMillis()}.jpg")
+        if (!f.renameTo(kopia)) { f.copyTo(kopia, true); f.delete() }
+        Toast.makeText(this, "Czytam etykietę...", Toast.LENGTH_SHORT).show()
+        watekKamery.execute {
+            val bmp = try { wczytajObraz({ kopia.inputStream() }, 2000) } catch (e: Exception) { null }
+            if (bmp == null) {
+                runOnUiThread { wyborProduktuChem(kopia, kod, "", "") }
+                return@execute
+            }
+            rozpoznawanie.process(InputImage.fromBitmap(bmp, 0))
+                .addOnSuccessListener { wynik ->
+                    // nazwa: linia pisana największą czcionką (min. 3 litery)
+                    val linie = wynik.textBlocks.flatMap { it.lines }
+                    val nazwa = linie.filter { l -> l.text.count { it.isLetter() } >= 3 }
+                        .maxByOrNull { it.boundingBox?.height() ?: 0 }?.text?.trim() ?: ""
+                    wyborProduktuChem(kopia, kod, wynik.text, nazwa)
+                }
+                .addOnFailureListener { wyborProduktuChem(kopia, kod, "", "") }
+        }
+    }
+
+    private fun wyborProduktuChem(plik: File, kod: String, tekst: String, nazwa: String) {
+        val odczyt = if (tekst.isNotBlank()) odczytEtykiety(tekst) else ""
+        val kand = if (tekst.isNotBlank()) dopasujChem(tekst, kod) else emptyList()
+        val opcje = mutableListOf<String>()
+        val akcje = mutableListOf<() -> Unit>()
+        for (k in kand) {
+            val jest = listaChem.any { it.id == k.first && it.kod == kod }
+            opcje.add((if (jest) "✔ " else "+ ") + k.second + (if (jest) "  (jest na $kod)" else "  (dopisz do $kod)"))
+            akcje.add { zapiszRozpoznaneChem(plik, Triple(k.first, kod, k.second), odczyt) }
+        }
+        opcje.add("🔎 Wybierz z całego spisu")
+        akcje.add { wybierzZeSpisuChem(plik, kod, odczyt) }
+        opcje.add("✎ Nowy produkt (nie ma go w spisie)")
+        akcje.add { nowyProduktChem(plik, kod, nazwa, odczyt) }
+        opcje.add("⏳ Do przypisania na komputerze")
+        akcje.add { zapiszRozpoznaneChem(plik, Triple(-1, kod, nazwa), odczyt) }
+        val tyt = when {
+            tekst.isBlank() -> "Nie udało się odczytać napisu - wybierz produkt"
+            kand.isEmpty() -> "Nie ma go w spisie? Odczytano: ${nazwa.take(40)}"
+            else -> "Rozpoznano - wybierz produkt"
+        }
+        runOnUiThread {
+            AlertDialog.Builder(this)
+                .setTitle(tyt + if (odczyt.isNotBlank()) "\n$odczyt" else "")
+                .setItems(opcje.toTypedArray()) { _, i -> akcje[i]() }
+                .setNegativeButton("Usuń zdjęcie") { _, _ -> plik.delete() }
+                .setCancelable(false)
+                .show()
+        }
+    }
+
+    private fun wybierzZeSpisuChem(plik: File, kod: String, odczyt: String) {
+        val wszystkie = listaChem.distinctBy { it.id }.sortedBy { it.nazwa.lowercase() }
+        val e = EditText(this)
+        e.hint = "Szukaj (fragment nazwy)"
+        val lv = ListView(this)
+        fun filtruj() {
+            val f = normCh(e.text.toString()).trim()
+            val l = wszystkie.filter { f.isEmpty() || normCh(it.nazwa).contains(f) }
+            lv.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, l.map { it.nazwa })
+            lv.tag = l
+        }
+        e.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(a: CharSequence?, b: Int, c: Int, d: Int) {}
+            override fun onTextChanged(a: CharSequence?, b: Int, c: Int, d: Int) {}
+            override fun afterTextChanged(x: Editable?) = filtruj()
+        })
+        filtruj()
+        val kol = LinearLayout(this)
+        kol.orientation = LinearLayout.VERTICAL
+        kol.setPadding(dp(12), dp(8), dp(12), 0)
+        kol.addView(e)
+        kol.addView(lv, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(380)))
+        val d = AlertDialog.Builder(this)
+            .setTitle("Produkt ze spisu")
+            .setView(kol)
+            .setNegativeButton("Wróć") { _, _ -> wyborProduktuChem(plik, kod, "", "") }
+            .setCancelable(false)
+            .create()
+        lv.setOnItemClickListener { _, _, i, _ ->
+            @Suppress("UNCHECKED_CAST")
+            val p = (lv.tag as List<ProdChem>)[i]
+            d.dismiss()
+            zapiszRozpoznaneChem(plik, Triple(p.id, kod, p.nazwa), odczyt)
+        }
+        d.show()
+    }
+
+    private fun nowyProduktChem(plik: File, kod: String, nazwa: String, odczyt: String) {
+        val e = EditText(this)
+        e.setText(nazwa)
+        e.hint = "Nazwa z etykiety"
+        e.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        AlertDialog.Builder(this)
+            .setTitle("Nowy produkt - wydział $kod")
+            .setMessage("Komputer zrobi zgłoszenie w \"Nowych produktach\"" + if (odczyt.isNotBlank()) " (odczyt z etykiety: $odczyt)." else ".")
+            .setView(e)
+            .setPositiveButton("Zapisz") { _, _ ->
+                val n = e.text.toString().trim()
+                zapiszRozpoznaneChem(plik, Triple(if (n.isEmpty()) -1 else 0, kod, n), odczyt)
+            }
+            .setNegativeButton("Wróć") { _, _ -> wyborProduktuChem(plik, kod, "", nazwa) }
+            .setCancelable(false)
+            .show()
+    }
+
+    private fun zapiszRozpoznaneChem(plik: File, cel: Triple<Int, String, String>, odczyt: String) {
+        zapiszZdjecieChem(cel, { plik.inputStream() }, "E", odczyt) { plik.delete() }
+        AlertDialog.Builder(this)
+            .setTitle("Zapisano: " + cel.third.ifBlank { "do przypisania" })
+            .setPositiveButton("Następne zdjęcie") { _, _ -> zdjecieRozpoznaj() }
+            .setNegativeButton("Koniec", null)
+            .show()
+    }
+
+    // ------------------------------------------------------------------
+    //  WYNIKI Z KOMPUTERA (co zrobił ze zdjęciami)
+    // ------------------------------------------------------------------
+    private fun wynikiChem(): List<String> {
+        val f = File(folderChem, "wyniki.txt")
+        return if (f.exists()) f.readLines(Charsets.UTF_8).filter { it.isNotBlank() } else emptyList()
+    }
+
+    private fun pokazOstatnieWynikiChem() {
+        if (!::tWynikiChem.isInitialized) return
+        val w = wynikiChem().take(2)
+        tWynikiChem.text = if (w.isEmpty()) "" else w.joinToString("\n") + "   (dotknij - więcej)"
+        tWynikiChem.visibility = if (w.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    private fun pokazWynikiChem() {
+        val w = wynikiChem()
+        if (w.isEmpty()) return
+        AlertDialog.Builder(this).setTitle("Zapisane w bazie").setMessage(w.take(40).joinToString("\n"))
+            .setPositiveButton("Zamknij", null).show()
+    }
+
+    // serwer: POST /chemia_wyniki - linie tekstu, najnowsze na górze (zostaje 60)
+    override fun chemiaWyniki(tekst: String) {
+        val godz = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date())
+        val nowe = tekst.replace("\r", "").split("\n").filter { it.isNotBlank() }.map { "$godz  " + polskie(it.trim()) }
+        if (nowe.isEmpty()) return
+        val wsz = (nowe + wynikiChem()).take(60)
+        try { File(folderChem, "wyniki.txt").writeText(wsz.joinToString("\n"), Charsets.UTF_8) } catch (e: Exception) {}
+        runOnUiThread {
+            pokazOstatnieWynikiChem()
+            if (tryb == "CHEMIA") {
+                Toast.makeText(this, "✔ W bazie: " + nowe.first().substringAfter("  "), Toast.LENGTH_LONG).show()
+                ton?.startTone(ToneGenerator.TONE_PROP_BEEP2, 200)
+            }
+        }
+    }
+
+    // serwer: GET /stan - Program BHP odpytuje w tle i decyduje, co wysłać / zabrać
+    //  "STAN|tryb|wersja spisu chemii|zdjęć chemii|wersja listy maszyn|połączeń maszyn|wersja spraw wypadkowych|zdjęć wypadków"
+    override fun stan(): String {
+        ostatnieTlo = SystemClock.elapsedRealtime()
+        runOnUiThread { pokazStan() }
+        return "STAN|$tryb|$wersjaListyChem|${zdjeciaChem().size}|$wersjaListyM|${powiazaniaMasz().size}|$wersjaSprawWyp|${plikiZdjec().size}"
     }
 
     private fun zrobZdjecieChem() {
@@ -1242,7 +1640,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         }
     }
 
-    private fun zapiszZdjecieChem(cel: Triple<Int, String, String>, otworz: () -> java.io.InputStream?, potem: () -> Unit) {
+    private fun zapiszZdjecieChem(cel: Triple<Int, String, String>, otworz: () -> java.io.InputStream?, typ: String = "E", odczyt: String = "", potem: () -> Unit) {
         watekKamery.execute {
             var ok = false
             try {
@@ -1250,7 +1648,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                 if (bmp != null) {
                     val nr = (zdjeciaChem().maxOfOrNull { it.first } ?: 0) + 1
                     FileOutputStream(File(folderChem, "ch_$nr.jpg")).use { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
-                    File(folderChem, "ch_$nr.txt").writeText("${cel.first}|${cel.second}|${cel.third.replace("|", " ")}", Charsets.UTF_8)
+                    File(folderChem, "ch_$nr.txt").writeText("${cel.first}|${cel.second}|${cel.third.replace("|", " ")}|$typ|${odczyt.replace("|", " ").replace("\n", " ")}", Charsets.UTF_8)
                     ok = true
                 }
             } catch (e: Exception) {
@@ -1293,7 +1691,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         val l = zdjeciaChem()
         return "CHZ|" + l.size + l.joinToString("") {
             val o = opisZdjeciaChem(it.first)
-            "\n${it.first}|${o.getOrElse(0) { "0" }}|${naKomputer(o.getOrElse(1) { "" })}|${naKomputer(o.getOrElse(2) { "" })}"
+            "\n${it.first}|${o.getOrElse(0) { "0" }}|${naKomputer(o.getOrElse(1) { "" })}|${naKomputer(o.getOrElse(2) { "" })}|${o.getOrElse(3) { "E" }}|${naKomputer(o.getOrElse(4) { "" })}"
         }
     }
 
@@ -1400,7 +1798,9 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         }
         zrodlaM = z
         kartotekaM = m
-        dataListyM = linie[0].substringAfter("|").trim()
+        val nag = linie[0].split("|")
+        dataListyM = nag.getOrElse(1) { "" }.trim()
+        wersjaListyM = nag.getOrElse(2) { "" }.trim()
     }
 
     // serwer: POST /maszyny
@@ -1410,8 +1810,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         try { File(folderMasz, "wyslane.txt").delete() } catch (e: Exception) {}
         runOnUiThread {
             if (tryb == "MASZYNY") ustawWydzialyMasz()
-            Toast.makeText(this, "Z komputera: ${zrodlaM.size} maszyn z pomiarów, kartoteka ${kartotekaM.size} poz.", Toast.LENGTH_SHORT).show()
-            ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
+            if (tryb == "MASZYNY") Toast.makeText(this, "Lista maszyn z komputera zaktualizowana", Toast.LENGTH_SHORT).show()
         }
     }
 

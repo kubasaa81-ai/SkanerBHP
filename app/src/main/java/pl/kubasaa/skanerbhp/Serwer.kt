@@ -10,12 +10,16 @@ import java.util.concurrent.Executors
 /**
  * Mały serwer HTTP w telefonie (port 8080). Program BHP na komputerze łączy się z nim przez GlobalProtect:
  *   GET  /ping            -> "SKANER_BHP|<tryb>"
+ *   GET  /stan            -> "STAN|tryb|wersja spisu chemii|zdjęć chemii|wersja maszyn|połączeń maszyn|wersja spraw|zdjęć wypadków"
+ *                            (Program BHP otwarty odpytuje w tle i sam wysyła listy / zabiera zdjęcia)
+ *   POST /chemia_wyniki   -> linie tekstu: co komputer zrobił ze zdjęciami etykiet
+ *   POST /zdjecia_sprawy  -> "WSL|wersja" + linie "id|opis" - otwarte sprawy wypadkowe (bez nazwisk)
  *   POST /lista           -> lista do wydania (tekst BHP1 ...), telefon ją pokazuje
  *   GET  /skany?od=N      -> zeskanowane kody od numeru N, linie "N|kod"
  *   POST /wynik           -> "N|kolor|tekst" - wynik sprawdzenia skanu w komputerze (1 OK, 2 błąd, 3 uwaga)
  *   POST /koniec          -> wydanie zapisane - lista zamknięta
  *   POST /katalog         -> katalog pozycji magazynu (Dostawa / Inwentura / Kody)
- *   GET  /zdjecia         -> zdjęcia czekające w telefonie (Zdjęcia - wypadki), linie "nr|opis"
+ *   GET  /zdjecia         -> zdjęcia czekające w telefonie (Zdjęcia - wypadki), linie "nr|opis|id sprawy (0 = nie wybrano)"
  *   GET  /zdjecie?nr=N    -> plik JPG zdjęcia N
  *   POST /odebrane        -> "nr,nr,..." komputer zapisał zdjęcia - telefon je kasuje
  *   POST /zdjecia_sprawa  -> opis sprawy (np. "Wypadek nr 4/2026") - pokazuje się na ekranie Zdjęcia
@@ -51,6 +55,9 @@ class Serwer(private val obsluga: Obsluga) {
         fun maszyny(tekst: String)
         fun maszynyPowiazania(): String
         fun maszynyOdebrane(tekst: String)
+        fun stan(): String
+        fun chemiaWyniki(tekst: String)
+        fun zdjeciaSprawy(tekst: String)
     }
 
     @Volatile private var gniazdo: ServerSocket? = null
@@ -150,6 +157,9 @@ class Serwer(private val obsluga: Obsluga) {
             }
             val odp: String = when {
                 sciezka == "/ping" -> obsluga.ping()
+                sciezka == "/stan" -> obsluga.stan()
+                sciezka == "/chemia_wyniki" && metoda == "POST" -> { obsluga.chemiaWyniki(cialo); "OK" }
+                sciezka == "/zdjecia_sprawy" && metoda == "POST" -> { obsluga.zdjeciaSprawy(cialo); "OK" }
                 sciezka == "/lista" && metoda == "POST" -> { obsluga.lista(cialo); "OK" }
                 sciezka == "/skany" -> {
                     val od = parametry.split("&").firstOrNull { it.startsWith("od=") }
