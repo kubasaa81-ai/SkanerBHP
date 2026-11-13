@@ -205,6 +205,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private lateinit var bWszystkieChem: Button
     private lateinit var listaChemWidok: LinearLayout
     private var wydzialyChem: List<String> = emptyList()
+    private var wszystkieWydzChem: List<Pair<String, String>> = emptyList()     // kod, nazwa - wszystkie wydziały z komputera
     private var celZdjecia: Triple<Int, String, String>? = null      // id produktu (0 = spoza listy, -1 do przypisania, -2 rozpoznaj), kod wydziału, nazwa
     private var typZdjeciaChem = "E"                                  // E etykieta, K karta charakterystyki (papier na wydziale)
     private var plikAparatu: File? = null
@@ -1254,14 +1255,17 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         val linie = tekst.replace("\r", "").split("\n")
         if (linie.isEmpty() || !linie[0].startsWith("CHL|")) return
         val nowa = mutableListOf<ProdChem>()
+        val wydz = mutableListOf<Pair<String, String>>()
         for (l in linie.drop(1)) {
             val p = l.split("|")
+            if (p.size == 3 && p[0] == "W") { wydz.add(Pair(polskie(p[1].trim()), polskie(p[2].trim()))); continue }
             if (p.size < 4) continue
             val id = p[0].trim().toIntOrNull() ?: continue
             nowa.add(ProdChem(id, polskie(p[1].trim()), p[2].trim() == "1", polskie(p[3].trim()),
                 polskie(p.getOrElse(4) { "" }.trim()), polskie(p.getOrElse(5) { "" }.trim()), polskie(p.getOrElse(6) { "" }.trim())))
         }
         listaChem = nowa
+        wszystkieWydzChem = wydz
         val n = linie[0].split("|")
         dataListyChem = n.getOrElse(1) { "" }.trim()
         wersjaListyChem = n.getOrElse(2) { "" }.trim()
@@ -1769,8 +1773,10 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     }
 
     private fun wybierzWydzialSerii() {
-        val kody = wydzialyChem
-        val opisy = kody.map { k -> k } + "— nie wiem / bez wydziału —"
+        // wszystkie wydziały (z komputera); stary spis bez nich - te ze spisu
+        val wsz = wszystkieWydzChem.ifEmpty { wydzialyChem.map { Pair(it, "") } }
+        val kody = wsz.map { it.first }
+        val opisy = wsz.map { if (it.second.isNotBlank()) it.first + "  -  " + it.second else it.first } + "— nie wiem / bez wydziału —"
         AlertDialog.Builder(this)
             .setTitle("Zdjęć: ${seriaChem.size} - z jakiego wydziału?")
             .setItems(opisy.toTypedArray()) { _, i ->
