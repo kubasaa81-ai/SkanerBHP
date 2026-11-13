@@ -152,7 +152,16 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private val aparatChem = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
         val f = plikAparatu
         val cel = celZdjecia
-        if (ok && f != null && f.exists() && cel != null) zapiszZdjecieChem(cel, { f.inputStream() }) { f.delete() }
+        if (ok && f != null && f.exists() && cel != null) {
+            zapiszZdjecieChem(cel, { f.inputStream() }) { f.delete() }
+            if (cel.first == -1) {
+                AlertDialog.Builder(this)
+                    .setTitle("Zapisano zdjęcie (wydział ${cel.second})")
+                    .setPositiveButton("Następne zdjęcie") { _, _ -> zrobZdjecieChem() }
+                    .setNegativeButton("Koniec", null)
+                    .show()
+            }
+        }
     }
     private val galeriaChem = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(10)) { uris ->
         val cel = celZdjecia
@@ -1009,8 +1018,10 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         przew.addView(listaChemWidok)
         ekranChem.addView(przew, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        ekranChem.addView(przycisk("+ Produkt spoza spisu (zdjęcie etykiety)", fiolet, 16f) { produktSpozaListy() },
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(56)))
+        val w3 = wiersz()
+        w3.addView(przycisk("+ Produkt spoza spisu", fiolet, 15f) { produktSpozaListy() }, lp(1f))
+        w3.addView(przycisk("Zdjęcia wydziału\n(przypiszemy później)", Color.rgb(0, 121, 107), 14f) { zdjeciaWydzialu() }, lp(1f, 6))
+        ekranChem.addView(w3, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(64)))
         wczytajListeChemZPliku()
     }
 
@@ -1102,7 +1113,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         val wysl = wyslaneChem()
         val lista = listaChem.filter { it.kod == kod && (wszystkieChem || it.doUst) }.sortedWith(compareBy({ !it.doUst }, { it.nazwa.lowercase() }))
         val czeka = zdjeciaChem().size
-        tStanChem.text = when {
+        val wydz = zdjeciaChem().count { val o = opisZdjeciaChem(it.first); o.getOrNull(0) == "-1" && o.getOrNull(1) == kod }
+        tStanChem.text = (if (wydz > 0) "Zdjęcia wydziału do przypisania: $wydz\n" else "") + when {
             listaChem.isEmpty() -> "Najpierw w komputerze: Spis substancji -> \"Lista na telefon\""
             lista.isEmpty() -> "Na tym wydziale nie ma produktów do ustalenia" + if (czeka > 0) "   |   zdjęć do wysłania: $czeka" else ""
             else -> "Dotknij produktu = zdjęcie etykiety" + if (czeka > 0) "   |   zdjęć do wysłania: $czeka" else ""
@@ -1183,6 +1195,32 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                     celZdjecia = Triple(0, kod, n)
                     zrobZdjecieChem()
                 }
+            }
+            .setNegativeButton("Anuluj", null)
+            .show()
+    }
+
+    // zdjęcia chemii na wydziale bez wskazania produktu (id -1) - komputer zbiera je "do przypisania"
+    private fun zdjeciaWydzialu() {
+        val kod = wydzialChem()
+        if (kod.isEmpty()) {
+            Toast.makeText(this, "Najpierw wybierz wydział (lista z komputera)", Toast.LENGTH_LONG).show()
+            return
+        }
+        val e = EditText(this)
+        e.hint = "Gdzie / co to jest (nieobowiązkowo), np. regał przy magazynie"
+        e.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        AlertDialog.Builder(this)
+            .setTitle("Zdjęcia chemii - wydział $kod")
+            .setMessage("Rób zdjęcia etykiet po kolei (po każdym zapyta o następne). Na komputerze razem przypiszemy je do produktów ze spisu albo dopiszemy nowe.")
+            .setView(e)
+            .setPositiveButton("Aparat") { _, _ ->
+                celZdjecia = Triple(-1, kod, e.text.toString().trim())
+                zrobZdjecieChem()
+            }
+            .setNeutralButton("Z galerii") { _, _ ->
+                celZdjecia = Triple(-1, kod, e.text.toString().trim())
+                galeriaChem.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
             }
             .setNegativeButton("Anuluj", null)
             .show()
