@@ -100,6 +100,13 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private lateinit var ekranZdj: LinearLayout
     private lateinit var ekranChem: LinearLayout
     private lateinit var ekranOdziez: LinearLayout
+    private lateinit var ekranChemMenu: LinearLayout
+    private lateinit var tKomputerChemMenu: TextView
+    private lateinit var tTytulChem: TextView
+    private lateinit var przewChem: ScrollView
+    private lateinit var bRozpoznajChem: Button
+    private lateinit var wPrzyciskiChem: LinearLayout
+    private var trybChem = 0                                  // 0 do ustalenia, 1 bez kart, 2 zdjęcie substancji
     private lateinit var ekranMasz: LinearLayout
     private lateinit var tKomputerOdz: TextView
     @Volatile private var tryb = "MENU"            // MENU / WYDANIE / DOSTAWA / INWENTURA / KODY / ZDJECIA / CHEMIA
@@ -327,6 +334,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         zbudujMagazyn()
         zbudujZdjecia()
         zbudujChemie()
+        zbudujChemiaMenu()
         zbudujMaszyny()
         pokazStart()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
@@ -338,6 +346,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             when (tryb) {
                 "MENU" -> moveTaskToBack(true)
                 "WYDANIE", "DOSTAWA", "INWENTURA", "KODY" -> pokazOdziez()
+                "CHEMIA" -> pokazChemiaMenu()
                 else -> pokazStart()
             }
         }
@@ -386,6 +395,13 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         return p
     }
 
+    // przycisk z dwiema liniami tekstu
+    private fun lpWysoki(gora: Int): LinearLayout.LayoutParams {
+        val p = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(96))
+        p.topMargin = dp(gora)
+        return p
+    }
+
     private fun lpPelny(gora: Int): LinearLayout.LayoutParams {
         val p = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(64))
         p.topMargin = dp(gora)
@@ -422,7 +438,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
 
         ekranStart.addView(przycisk("Odzież i ŚOI", Color.rgb(46, 125, 50), 24f) { pokazOdziez() }, lpPelny(18))
         ekranStart.addView(przycisk("Wypadki - zdjęcia", Color.rgb(198, 40, 40), 22f) { pokazZdjecia() }, lpPelny(12))
-        ekranStart.addView(przycisk("Chemia - etykiety", Color.rgb(106, 27, 154), 22f) { pokazChemie() }, lpPelny(12))
+        ekranStart.addView(przycisk("Chemia", Color.rgb(106, 27, 154), 22f) { pokazChemiaMenu() }, lpPelny(12))
         ekranStart.addView(przycisk("Maszyny - pomiary", Color.rgb(69, 90, 100), 22f) { pokazMaszyny() }, lpPelny(12))
 
         val odstep = View(this)
@@ -439,6 +455,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         val w1 = wiersz()
         w1.addView(przycisk("\u2190 Menu", szary) { pokazStart() })
         w1.addView(tekst("  Odzież i ŚOI", 24f, Color.rgb(46, 125, 50), true), lp(1f))
+        w1.addView(przycisk("Zakończ", czerwony) { zakoncz() })
         ekranOdziez.addView(w1)
         tKomputerOdz = tekst("", 14f, szary)
         tKomputerOdz.setPadding(0, dp(10), 0, dp(4))
@@ -620,6 +637,11 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             }
             tKomputerMasz.setTextColor(if (zrodlaM.isEmpty()) pomaranczowy else if (vpn && (tloWidziane() || komputerWidziany())) zielony else szary)
         }
+        if (::tKomputerChemMenu.isInitialized) {
+            tKomputerChemMenu.text = if (vpn && (tloWidziane() || komputerWidziany())) "\u2714 Program BHP otwarty - spis i zdjęcia wymieniają się same"
+                else if (!vpn) "GlobalProtect wyłączony - zdjęcia czekają w telefonie" else "Program BHP zamknięty - zdjęcia pójdą same po jego otwarciu"
+            tKomputerChemMenu.setTextColor(if (vpn && (tloWidziane() || komputerWidziany())) zielony else szary)
+        }
         if (::tKomputerChem.isInitialized) {
             tKomputerChem.text = when {
                 listaChem.isEmpty() && (tloWidziane() || komputerWidziany()) -> "Program BHP otwarty - spis za chwilę przyjdzie sam"
@@ -731,6 +753,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         val w1 = wiersz()
         w1.addView(przycisk("← Menu", szary) { pokazStart() })
         w1.addView(tekst("  Zdjęcia - wypadki", 22f, czerwony, true), lp(1f))
+        w1.addView(przycisk("Zakończ", czerwony) { zakoncz() })
         ekranZdj.addView(w1)
 
         tSprawaZdj = tekst("", 15f, Color.rgb(173, 20, 87), true)
@@ -1106,8 +1129,10 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         val fiolet = Color.rgb(106, 27, 154)
 
         val w1 = wiersz()
-        w1.addView(przycisk("← Menu", szary) { pokazStart() })
-        w1.addView(tekst("  Etykiety chemii", 22f, fiolet, true), lp(1f))
+        w1.addView(przycisk("← Chemia", szary) { pokazChemiaMenu() })
+        tTytulChem = tekst("  Chemia", 20f, fiolet, true)
+        w1.addView(tTytulChem, lp(1f))
+        w1.addView(przycisk("Zakończ", czerwony) { zakoncz() })
         ekranChem.addView(w1)
 
         tKomputerChem = tekst("", 13f, szary)
@@ -1123,6 +1148,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             pokazListeChem()
         }
         w2.addView(bWszystkieChem, lp(1f, 6))
+        bWszystkieChem.visibility = View.GONE              // rodzaj listy wybierany w menu Chemia
         ekranChem.addView(w2)
         spWydzChem.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) = pokazListeChem()
@@ -1138,15 +1164,16 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         tWynikiChem.setOnClickListener { pokazWynikiChem() }
         ekranChem.addView(tWynikiChem)
 
-        val przew = ScrollView(this)
+        przewChem = ScrollView(this)
         listaChemWidok = LinearLayout(this)
         listaChemWidok.orientation = LinearLayout.VERTICAL
-        przew.addView(listaChemWidok)
-        ekranChem.addView(przew, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        przewChem.addView(listaChemWidok)
+        ekranChem.addView(przewChem, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        ekranChem.addView(przycisk("\uD83D\uDCF7  Zdjęcie etykiety - telefon rozpozna produkt", fiolet, 17f) { zdjecieRozpoznaj() },
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(60)))
+        bRozpoznajChem = przycisk("\uD83D\uDCF7  Zrób zdjęcie substancji\n(telefon rozpozna produkt i przypisze do wydziału)", fiolet, 18f) { zdjecieRozpoznaj() }
+        ekranChem.addView(bRozpoznajChem, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(110)))
         val w3 = wiersz()
+        wPrzyciskiChem = w3
         w3.addView(przycisk("+ Spoza spisu (wpiszę nazwę)", Color.rgb(74, 20, 140), 14f) { produktSpozaListy() }, lp(1f))
         w3.addView(przycisk("Zdjęcia wydziału\n(przypiszemy później)", Color.rgb(0, 121, 107), 14f) { zdjeciaWydzialu() }, lp(1f, 6))
         val lpW3 = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(60))
@@ -1156,8 +1183,43 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         pokazOstatnieWynikiChem()
     }
 
-    private fun pokazChemie() {
+    // podmenu Chemia: do ustalenia / bez kart / zdjęcie substancji
+    private fun zbudujChemiaMenu() {
+        val fiolet = Color.rgb(106, 27, 154)
+        ekranChemMenu = LinearLayout(this)
+        ekranChemMenu.orientation = LinearLayout.VERTICAL
+        ekranChemMenu.setPadding(dp(18), dp(18), dp(18), dp(18))
+        ekranChemMenu.setBackgroundColor(Color.rgb(245, 248, 252))
+        val w1 = wiersz()
+        w1.addView(przycisk("\u2190 Menu", szary) { pokazStart() })
+        w1.addView(tekst("  Chemia", 24f, fiolet, true), lp(1f))
+        w1.addView(przycisk("Zakończ", czerwony) { zakoncz() })
+        ekranChemMenu.addView(w1)
+        tKomputerChemMenu = tekst("", 14f, szary)
+        tKomputerChemMenu.setPadding(0, dp(10), 0, dp(4))
+        ekranChemMenu.addView(tKomputerChemMenu)
+        ekranChemMenu.addView(przycisk("Substancje do ustalenia\n(zdjęcie etykiety)", pomaranczowy, 20f) { pokazChemie(0) }, lpWysoki(14))
+        ekranChemMenu.addView(przycisk("Substancje bez kart charakterystyki\n(zdjęcie karty z wydziału)", Color.rgb(198, 40, 40), 20f) { pokazChemie(1) }, lpWysoki(12))
+        ekranChemMenu.addView(przycisk("Zdjęcie substancji\n(rozpozna i przypisze do wydziału)", fiolet, 20f) { pokazChemie(2) }, lpWysoki(12))
+    }
+
+    private fun pokazChemiaMenu() {
         zatrzymajKamere()
+        tryb = "CHEMIA_MENU"
+        setContentView(ekranChemMenu)
+        pokazStan()
+    }
+
+    private fun pokazChemie(t: Int = trybChem) {
+        zatrzymajKamere()
+        trybChem = t
+        filtrChem = if (t == 1) 1 else 0
+        tTytulChem.text = when (t) { 0 -> "  Do ustalenia"; 1 -> "  Bez kart"; else -> "  Zdjęcie substancji" }
+        val lista = t != 2
+        przewChem.visibility = if (lista) View.VISIBLE else View.GONE
+        tStanChem.visibility = if (lista) View.VISIBLE else View.GONE
+        bRozpoznajChem.visibility = if (lista) View.GONE else View.VISIBLE
+        wPrzyciskiChem.visibility = if (lista) View.GONE else View.VISIBLE
         tryb = "CHEMIA"
         setContentView(ekranChem)
         ustawWydzialyChem()
@@ -1737,6 +1799,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         val w1 = wiersz()
         w1.addView(przycisk("← Menu", szary) { pokazStart() })
         w1.addView(tekst("  Maszyny - pomiary", 22f, grafit, true), lp(1f))
+        w1.addView(przycisk("Zakończ", czerwony) { zakoncz() })
         ekranMasz.addView(w1)
         tKomputerMasz = tekst("", 13f, szary)
         tKomputerMasz.setPadding(0, dp(6), 0, dp(4))
