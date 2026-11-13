@@ -55,6 +55,7 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
@@ -72,6 +73,9 @@ import kotlin.system.exitProcess
  * Wydanie: komputer wysyła listę "co wydać", aparat czyta kody, komputer pobiera skany i odsyła wynik.
  * Dostawa / Inwentura / Kody: katalog z komputera (warianty, rozmiary, stany, kody producenta) -
  *   znany kod = od razu pozycja, nieznany = wybór z listy i przypisanie kodu; polecenia @DOST / @INW / @KOD.
+ * Etykiety chemii: komputer wysyła spis substancji (produkt x wydział), na wydziale robisz zdjęcia etykiet
+ *   produktów "do ustalenia" (czy niebezpieczny, czy karta wymagana) - komputer pobiera je do produktów
+ *   (Spis substancji -> "Zdjęcia z telefonu").  Lista zostaje w telefonie, gdy na hali nie ma zasięgu.
  * Zdjęcia (wypadki): zdjęcia zrobione zwykłym aparatem wybierasz z galerii (podgląd, opis każdego) -
  *   kopie (pomniejszone) czekają w aplikacji, komputer pobiera je do protokołu oględzin
  *   (Oględziny -> "Z telefonu") i wtedy aplikacja kasuje swoje kopie.
@@ -88,7 +92,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private lateinit var ekranWydanie: LinearLayout
     private lateinit var ekranMag: LinearLayout
     private lateinit var ekranZdj: LinearLayout
-    @Volatile private var tryb = "MENU"            // MENU / WYDANIE / DOSTAWA / INWENTURA / KODY / ZDJECIA
+    private lateinit var ekranChem: LinearLayout
+    @Volatile private var tryb = "MENU"            // MENU / WYDANIE / DOSTAWA / INWENTURA / KODY / ZDJECIA / CHEMIA
     private val naWydaniu: Boolean get() = tryb == "WYDANIE"
 
     // magazyn (dostawa / inwentura / kody)
@@ -122,6 +127,33 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     }
     @Volatile private var sprawaZdj = ""
     private val folderZdj: File by lazy { File(filesDir, "zdjecia").apply { mkdirs() } }
+
+    // etykiety chemii: lista z komputera (chemia/lista.txt), zdjęcia chemia/ch_<nr>.jpg + ch_<nr>.txt ("id|kod|nazwa")
+    private class ProdChem(val id: Int, val kod: String, val doUst: Boolean, val nazwa: String, val producent: String, val miejsce: String)
+    private var listaChem: List<ProdChem> = emptyList()
+    @Volatile private var dataListyChem = ""
+    private val folderChem: File by lazy { File(filesDir, "chemia").apply { mkdirs() } }
+    private lateinit var tKomputerChem: TextView
+    private lateinit var tStanChem: TextView
+    private lateinit var spWydzChem: Spinner
+    private lateinit var bWszystkieChem: Button
+    private lateinit var listaChemWidok: LinearLayout
+    private var wszystkieChem = false
+    private var wydzialyChem: List<String> = emptyList()
+    private var celZdjecia: Triple<Int, String, String>? = null      // id produktu (0 = spoza listy), kod wydziału, nazwa
+    private var plikAparatu: File? = null
+    private val aparatChem = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
+        val f = plikAparatu
+        val cel = celZdjecia
+        if (ok && f != null && f.exists() && cel != null) zapiszZdjecieChem(cel, { f.inputStream() }) { f.delete() }
+    }
+    private val galeriaChem = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(10)) { uris ->
+        val cel = celZdjecia
+        if (cel != null) for (u in uris) zapiszZdjecieChem(cel, { contentResolver.openInputStream(u) }) {}
+    }
+    private val prosbaKameraChem = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        if (ok) zrobZdjecieChem() else Toast.makeText(this, "Bez zgody na aparat - wybierz zdjęcie z galerii", Toast.LENGTH_LONG).show()
+    }
 
     // start
     private lateinit var tSiec: TextView
@@ -218,6 +250,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         zbudujWydanie()
         zbudujMagazyn()
         zbudujZdjecia()
+        zbudujChemie()
         pokazStart()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
             prosbaSms.launch(Manifest.permission.SEND_SMS)
@@ -294,7 +327,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         ekranStart.setBackgroundColor(Color.rgb(245, 248, 252))
 
         ekranStart.addView(tekst("Skaner BHP", 30f, Color.rgb(0, 105, 92), true))
-        ekranStart.addView(tekst("Program BHP - odzież i ŚOI, wypadki", 15f, szary))
+        ekranStart.addView(tekst("Program BHP - odzież i ŚOI, wypadki, chemia", 15f, szary))
 
         tSiec = tekst("", 15f, szary, true)
         tSiec.setPadding(0, dp(16), 0, 0)
@@ -311,6 +344,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         ekranStart.addView(przycisk("Inwentura", Color.rgb(2, 119, 189), 22f) { pokazMagazyn("INWENTURA") }, lpPelny(12))
         ekranStart.addView(przycisk("Kody producenta", Color.rgb(239, 108, 0), 20f) { pokazMagazyn("KODY") }, lpPelny(12))
         ekranStart.addView(przycisk("Zdjęcia - wypadki", Color.rgb(198, 40, 40), 20f) { pokazZdjecia() }, lpPelny(12))
+        ekranStart.addView(przycisk("Etykiety chemii", Color.rgb(106, 27, 154), 20f) { pokazChemie() }, lpPelny(12))
 
         val odstep = View(this)
         ekranStart.addView(odstep, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -464,6 +498,15 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                 else -> "Komputer pobierze zdjęcia: Oględziny -> \"Z telefonu\""
             }
             tKomputerZdj.setTextColor(if (vpn && komputerWidziany()) zielony else szary)
+        }
+        if (::tKomputerChem.isInitialized) {
+            tKomputerChem.text = when {
+                listaChem.isEmpty() -> "Brak spisu - w komputerze: Spis substancji -> \"Lista na telefon\""
+                !vpn -> "Spis z $dataListyChem (${listaChem.size} poz.) - zdjęcia czekają w telefonie, komputer pobierze je później"
+                komputerWidziany() -> "\u2714 Komputer połączony ($adresKomputera)  -  spis z $dataListyChem"
+                else -> "Spis z $dataListyChem - komputer pobierze zdjęcia: Spis substancji -> \"Zdjęcia z telefonu\""
+            }
+            tKomputerChem.setTextColor(if (listaChem.isEmpty()) pomaranczowy else if (vpn && komputerWidziany()) zielony else szary)
         }
         if (::tKomputerMag.isInitialized) {
             tKomputerMag.text = when {
@@ -850,6 +893,328 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         sprawaZdj = polskie(tekst.trim())
         runOnUiThread {
             if (::tSprawaZdj.isInitialized && sprawaZdj.isNotBlank()) tSprawaZdj.text = sprawaZdj
+        }
+    }
+
+    // ------------------------------------------------------------------
+    //  ETYKIETY CHEMII
+    //  POST /chemia:  "CHL|data" + linie "id|kod|1/0 do ustalenia|nazwa|producent|miejsce"  (~a = ą ...)
+    //  GET /chemia_zdjecia -> "CHZ|n" + linie "nr|id|kod|nazwa";  GET /chemia_zdjecie?nr=N;  POST /chemia_odebrane "nr,nr"
+    // ------------------------------------------------------------------
+    private fun zbudujChemie() {
+        ekranChem = LinearLayout(this)
+        ekranChem.orientation = LinearLayout.VERTICAL
+        ekranChem.setPadding(dp(12), dp(12), dp(12), dp(12))
+        ekranChem.setBackgroundColor(Color.rgb(245, 248, 252))
+        val fiolet = Color.rgb(106, 27, 154)
+
+        val w1 = wiersz()
+        w1.addView(przycisk("← Menu", szary) { pokazStart() })
+        w1.addView(tekst("  Etykiety chemii", 22f, fiolet, true), lp(1f))
+        ekranChem.addView(w1)
+
+        tKomputerChem = tekst("", 13f, szary)
+        tKomputerChem.setPadding(0, dp(6), 0, dp(4))
+        ekranChem.addView(tKomputerChem)
+
+        val w2 = wiersz()
+        w2.addView(tekst("Wydział: ", 16f, szary, true))
+        spWydzChem = Spinner(this)
+        w2.addView(spWydzChem, lp(1f))
+        bWszystkieChem = przycisk("Tylko do ustalenia", pomaranczowy, 13f) {
+            wszystkieChem = !wszystkieChem
+            pokazListeChem()
+        }
+        w2.addView(bWszystkieChem, lp(1f, 6))
+        ekranChem.addView(w2)
+        spWydzChem.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) = pokazListeChem()
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
+        tStanChem = tekst("", 14f, szary, true)
+        tStanChem.gravity = Gravity.CENTER
+        tStanChem.setPadding(0, dp(6), 0, dp(6))
+        ekranChem.addView(tStanChem)
+
+        val przew = ScrollView(this)
+        listaChemWidok = LinearLayout(this)
+        listaChemWidok.orientation = LinearLayout.VERTICAL
+        przew.addView(listaChemWidok)
+        ekranChem.addView(przew, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        ekranChem.addView(przycisk("+ Produkt spoza spisu (zdjęcie etykiety)", fiolet, 16f) { produktSpozaListy() },
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(56)))
+        wczytajListeChemZPliku()
+    }
+
+    private fun pokazChemie() {
+        zatrzymajKamere()
+        tryb = "CHEMIA"
+        setContentView(ekranChem)
+        ustawWydzialyChem()
+        pokazStan()
+    }
+
+    private fun wczytajListeChemZPliku() {
+        val f = File(folderChem, "lista.txt")
+        if (f.exists()) try { przetworzListeChem(f.readText(Charsets.UTF_8)) } catch (e: Exception) {}
+    }
+
+    private fun przetworzListeChem(tekst: String) {
+        val linie = tekst.replace("\r", "").split("\n")
+        if (linie.isEmpty() || !linie[0].startsWith("CHL|")) return
+        val nowa = mutableListOf<ProdChem>()
+        for (l in linie.drop(1)) {
+            val p = l.split("|")
+            if (p.size < 4) continue
+            val id = p[0].trim().toIntOrNull() ?: continue
+            nowa.add(ProdChem(id, polskie(p[1].trim()), p[2].trim() == "1", polskie(p[3].trim()),
+                polskie(p.getOrElse(4) { "" }.trim()), polskie(p.getOrElse(5) { "" }.trim())))
+        }
+        listaChem = nowa
+        dataListyChem = linie[0].substringAfter("|").trim()
+    }
+
+    // serwer: POST /chemia
+    override fun chemia(tekst: String) {
+        try { File(folderChem, "lista.txt").writeText(tekst, Charsets.UTF_8) } catch (e: Exception) {}
+        przetworzListeChem(tekst)
+        runOnUiThread {
+            if (tryb == "CHEMIA") ustawWydzialyChem()
+            Toast.makeText(this, "Spis substancji z komputera: ${listaChem.size} poz.", Toast.LENGTH_SHORT).show()
+            ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
+        }
+    }
+
+    private fun ustawWydzialyChem() {
+        val stary = spWydzChem.selectedItem?.toString()
+        wydzialyChem = listaChem.map { it.kod }.distinct().sorted()
+        val opisy = wydzialyChem.map { k ->
+            val n = listaChem.count { it.kod == k && it.doUst && liczbaZdjecChem(it.id, k) == 0 }
+            if (n > 0) "$k  ($n do ustalenia)" else k
+        }
+        spWydzChem.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, opisy)
+        val i = if (stary != null) opisy.indexOfFirst { it.substringBefore(" ") == stary.substringBefore(" ") } else -1
+        if (i >= 0) spWydzChem.setSelection(i)
+        pokazListeChem()
+    }
+
+    private fun wydzialChem(): String {
+        val i = spWydzChem.selectedItemPosition
+        return if (i in wydzialyChem.indices) wydzialyChem[i] else ""
+    }
+
+    private fun zdjeciaChem(): List<Pair<Int, File>> {
+        val f = folderChem.listFiles() ?: return emptyList()
+        return f.filter { it.name.startsWith("ch_") && it.name.endsWith(".jpg") }
+            .mapNotNull { pl -> pl.name.removePrefix("ch_").removeSuffix(".jpg").toIntOrNull()?.let { Pair(it, pl) } }
+            .sortedBy { it.first }
+    }
+
+    private fun opisZdjeciaChem(nr: Int): List<String> {
+        val t = File(folderChem, "ch_$nr.txt")
+        return if (t.exists()) t.readText(Charsets.UTF_8).split("|", limit = 3) else listOf("0", "", "")
+    }
+
+    private fun liczbaZdjecChem(id: Int, kod: String): Int = zdjeciaChem().count {
+        val o = opisZdjeciaChem(it.first)
+        o.getOrNull(0) == id.toString() && o.getOrNull(1) == kod
+    }
+
+    // zdjęcia już pobrane przez komputer: "id|kod" (żeby na hali było widać, co jest zrobione)
+    private fun wyslaneChem(): Set<String> {
+        val f = File(folderChem, "wyslane.txt")
+        return if (f.exists()) f.readLines(Charsets.UTF_8).toSet() else emptySet()
+    }
+
+    private fun pokazListeChem() {
+        if (!::listaChemWidok.isInitialized) return
+        listaChemWidok.removeAllViews()
+        bWszystkieChem.text = if (wszystkieChem) "Pokaż: wszystkie" else "Pokaż: do ustalenia"
+        val kod = wydzialChem()
+        val wysl = wyslaneChem()
+        val lista = listaChem.filter { it.kod == kod && (wszystkieChem || it.doUst) }.sortedWith(compareBy({ !it.doUst }, { it.nazwa.lowercase() }))
+        val czeka = zdjeciaChem().size
+        tStanChem.text = when {
+            listaChem.isEmpty() -> "Najpierw w komputerze: Spis substancji -> \"Lista na telefon\""
+            lista.isEmpty() -> "Na tym wydziale nie ma produktów do ustalenia" + if (czeka > 0) "   |   zdjęć do wysłania: $czeka" else ""
+            else -> "Dotknij produktu = zdjęcie etykiety" + if (czeka > 0) "   |   zdjęć do wysłania: $czeka" else ""
+        }
+        tStanChem.setTextColor(if (czeka > 0) pomaranczowy else szary)
+        for (p in lista) {
+            val n = liczbaZdjecChem(p.id, p.kod)
+            val bylo = wysl.contains("${p.id}|${p.kod}")
+            val ramka = LinearLayout(this)
+            ramka.orientation = LinearLayout.VERTICAL
+            ramka.setPadding(dp(10), dp(8), dp(10), dp(8))
+            val tlo = GradientDrawable()
+            tlo.cornerRadius = dp(8).toFloat()
+            tlo.setColor(Color.WHITE)
+            tlo.setStroke(dp(2), when {
+                n > 0 -> zielony
+                bylo -> niebieski
+                p.doUst -> pomaranczowy
+                else -> Color.rgb(207, 216, 220)
+            })
+            ramka.background = tlo
+            ramka.addView(tekst(p.nazwa, 16f, Color.rgb(38, 50, 56), true))
+            val opis = listOf(p.producent, p.miejsce).filter { it.isNotBlank() }.joinToString("  |  ")
+            if (opis.isNotBlank()) ramka.addView(tekst(opis, 13f, szary))
+            val stan = when {
+                n > 0 -> "📷 zdjęć: $n - czekają na komputer"
+                bylo -> "✔ zdjęcie wysłane do komputera"
+                p.doUst -> "DO USTALENIA - zrób zdjęcie etykiety (piktogramy, hasło, zwroty H)"
+                else -> "klasyfikacja ustalona"
+            }
+            ramka.addView(tekst(stan, 13f, if (n > 0) zielony else if (bylo) niebieski else if (p.doUst) pomaranczowy else szary, true))
+            ramka.setOnClickListener { menuProduktuChem(p.id, p.kod, p.nazwa) }
+            val lpR = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            lpR.topMargin = dp(6)
+            listaChemWidok.addView(ramka, lpR)
+        }
+    }
+
+    private fun menuProduktuChem(id: Int, kod: String, nazwa: String) {
+        celZdjecia = Triple(id, kod, nazwa)
+        val n = liczbaZdjecChem(id, kod)
+        val opcje = mutableListOf("Zrób zdjęcie etykiety", "Wybierz z galerii")
+        if (n > 0) {
+            opcje.add("Podgląd zdjęć ($n)")
+            opcje.add("Usuń zdjęcia tego produktu ($n)")
+        }
+        AlertDialog.Builder(this)
+            .setTitle(nazwa)
+            .setItems(opcje.toTypedArray()) { _, k ->
+                when (opcje[k]) {
+                    "Zrób zdjęcie etykiety" -> zrobZdjecieChem()
+                    "Wybierz z galerii" -> galeriaChem.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    else -> if (opcje[k].startsWith("Podgląd")) podgladZdjecChem(id, kod) else {
+                        zdjeciaChem().filter { val o = opisZdjeciaChem(it.first); o.getOrNull(0) == id.toString() && o.getOrNull(1) == kod }
+                            .forEach { usunZdjecieChem(it.first) }
+                        pokazListeChem()
+                    }
+                }
+            }
+            .setNegativeButton("Zamknij", null)
+            .show()
+    }
+
+    private fun produktSpozaListy() {
+        val kod = wydzialChem()
+        val e = EditText(this)
+        e.hint = "Nazwa z etykiety (np. WD-40)"
+        e.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        AlertDialog.Builder(this)
+            .setTitle("Produkt spoza spisu" + if (kod.isNotEmpty()) " - wydział $kod" else "")
+            .setMessage("Komputer zrobi z niego zgłoszenie w \"Nowych produktach\".")
+            .setView(e)
+            .setPositiveButton("Zdjęcie") { _, _ ->
+                val n = e.text.toString().trim()
+                if (n.isEmpty()) {
+                    Toast.makeText(this, "Wpisz nazwę produktu", Toast.LENGTH_LONG).show()
+                } else {
+                    celZdjecia = Triple(0, kod, n)
+                    zrobZdjecieChem()
+                }
+            }
+            .setNegativeButton("Anuluj", null)
+            .show()
+    }
+
+    private fun zrobZdjecieChem() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            prosbaKameraChem.launch(Manifest.permission.CAMERA)
+            return
+        }
+        try {
+            val f = File(cacheDir, "aparat_chemia.jpg")
+            if (f.exists()) f.delete()
+            plikAparatu = f
+            val uri = FileProvider.getUriForFile(this, "$packageName.pliki", f)
+            aparatChem.launch(uri)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Nie udało się otworzyć aparatu: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun zapiszZdjecieChem(cel: Triple<Int, String, String>, otworz: () -> java.io.InputStream?, potem: () -> Unit) {
+        watekKamery.execute {
+            var ok = false
+            try {
+                val bmp = wczytajObraz(otworz, 1800)
+                if (bmp != null) {
+                    val nr = (zdjeciaChem().maxOfOrNull { it.first } ?: 0) + 1
+                    FileOutputStream(File(folderChem, "ch_$nr.jpg")).use { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+                    File(folderChem, "ch_$nr.txt").writeText("${cel.first}|${cel.second}|${cel.third.replace("|", " ")}", Charsets.UTF_8)
+                    ok = true
+                }
+            } catch (e: Exception) {
+            }
+            potem()
+            runOnUiThread {
+                if (ok) ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
+                else Toast.makeText(this, "Nie udało się zapisać zdjęcia", Toast.LENGTH_LONG).show()
+                if (tryb == "CHEMIA") ustawWydzialyChem()
+            }
+        }
+    }
+
+    private fun podgladZdjecChem(id: Int, kod: String) {
+        val pliki = zdjeciaChem().filter { val o = opisZdjeciaChem(it.first); o.getOrNull(0) == id.toString() && o.getOrNull(1) == kod }
+        if (pliki.isEmpty()) return
+        val kol = LinearLayout(this)
+        kol.orientation = LinearLayout.VERTICAL
+        for ((_, f) in pliki) {
+            val iv = ImageView(this)
+            iv.adjustViewBounds = true
+            iv.scaleType = ImageView.ScaleType.FIT_CENTER
+            try { iv.setImageBitmap(wczytajObraz({ f.inputStream() }, 1200)) } catch (e: Exception) {}
+            val p = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            p.bottomMargin = dp(8)
+            kol.addView(iv, p)
+        }
+        val sv = ScrollView(this)
+        sv.addView(kol)
+        AlertDialog.Builder(this).setView(sv).setPositiveButton("Zamknij", null).show()
+    }
+
+    private fun usunZdjecieChem(nr: Int) {
+        File(folderChem, "ch_$nr.jpg").delete()
+        File(folderChem, "ch_$nr.txt").delete()
+    }
+
+    // serwer: GET /chemia_zdjecia
+    override fun chemiaZdjecia(): String {
+        val l = zdjeciaChem()
+        return "CHZ|" + l.size + l.joinToString("") {
+            val o = opisZdjeciaChem(it.first)
+            "\n${it.first}|${o.getOrElse(0) { "0" }}|${naKomputer(o.getOrElse(1) { "" })}|${naKomputer(o.getOrElse(2) { "" })}"
+        }
+    }
+
+    // serwer: GET /chemia_zdjecie?nr=N
+    override fun chemiaZdjecie(nr: Int): ByteArray? {
+        val f = File(folderChem, "ch_$nr.jpg")
+        return if (f.exists()) f.readBytes() else null
+    }
+
+    // serwer: POST /chemia_odebrane "nr,nr" - komputer zapisał zdjęcia
+    override fun chemiaOdebrane(tekst: String) {
+        val wysl = wyslaneChem().toMutableSet()
+        for (t in tekst.split(",")) {
+            val nr = t.trim().toIntOrNull() ?: continue
+            val o = opisZdjeciaChem(nr)
+            if ((o.getOrNull(0)?.toIntOrNull() ?: 0) > 0) wysl.add("${o[0]}|${o.getOrElse(1) { "" }}")
+            usunZdjecieChem(nr)
+        }
+        try { File(folderChem, "wyslane.txt").writeText(wysl.joinToString("\n"), Charsets.UTF_8) } catch (e: Exception) {}
+        runOnUiThread {
+            if (tryb == "CHEMIA") {
+                ustawWydzialyChem()
+                Toast.makeText(this, "✔ Komputer pobrał zdjęcia etykiet", Toast.LENGTH_LONG).show()
+                ton?.startTone(ToneGenerator.TONE_PROP_BEEP2, 300)
+            }
         }
     }
 
