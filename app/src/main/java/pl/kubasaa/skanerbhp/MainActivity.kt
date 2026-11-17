@@ -83,6 +83,8 @@ import kotlin.system.exitProcess
  * Maszyny - pomiary: komputer wysyła źródła z pomiarów (stary spis) i kartotekę maszyn; na hali przypisujesz
  *   źródłu maszynę z kartoteki (nr inw. z tabliczki albo wybór z listy, kilka maszyn = rozbicie, "nie maszyna");
  *   komputer pobiera przypisania (Pomiary -> Maszyny w pomiarach -> "Połączenia z telefonu").
+ * Komisja BHP: komputer wysyła punkty z poprzedniego protokołu, telefon pokazuje je po jednym
+ *   (Wykonano / Nie wykonano / W trakcie / Pomiń), komputer pobiera oceny ("Z telefonu").
  * Zdjęcia (wypadki): zdjęcia zrobione zwykłym aparatem wybierasz z galerii (podgląd, opis każdego) -
  *   kopie (pomniejszone) czekają w aplikacji, komputer pobiera je do protokołu oględzin
  *   (Oględziny -> "Z telefonu") i wtedy aplikacja kasuje swoje kopie.
@@ -271,6 +273,23 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private var wszystkieMasz = false
     private var wydzialyMasz: List<String> = emptyList()
 
+    // komisja BHP - ocena zaleceń z poprzedniego protokołu (jeden punkt na ekranie)
+    private class PunktKom(val nr: Int, val etyk: String, val tekst: String, val stary: String)
+    private var punktyKom: List<PunktKom> = emptyList()
+    @Volatile private var idListyKom = ""
+    private var tytulKom = ""
+    private var biezacyKom = 0
+    private val folderKom: File by lazy { File(filesDir, "komisja").apply { mkdirs() } }
+    private lateinit var ekranKom: LinearLayout
+    private lateinit var tTytulKom: TextView
+    private lateinit var tLicznikKom: TextView
+    private lateinit var tEtykKom: TextView
+    private lateinit var tTrescKom: TextView
+    private lateinit var tStatusKom: TextView
+    private lateinit var przewKom: ScrollView
+    private lateinit var wOcenyKom: LinearLayout
+    private lateinit var wNawKom: LinearLayout
+
     // start
     private lateinit var tSiec: TextView
     private lateinit var tKomputerStart: TextView
@@ -370,6 +389,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         zbudujChemie()
         zbudujChemiaMenu()
         zbudujMaszyny()
+        zbudujKomisje()
         pokazStart()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
             prosbaSms.launch(Manifest.permission.SEND_SMS)
@@ -474,6 +494,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         ekranStart.addView(przycisk("Wypadki - zdjęcia", Color.rgb(198, 40, 40), 22f) { pokazZdjecia() }, lpPelny(12))
         ekranStart.addView(przycisk("Chemia", Color.rgb(106, 27, 154), 22f) { pokazChemiaMenu() }, lpPelny(12))
         ekranStart.addView(przycisk("Maszyny - pomiary", Color.rgb(69, 90, 100), 22f) { pokazMaszyny() }, lpPelny(12))
+        ekranStart.addView(przycisk("Komisja BHP - zalecenia", Color.rgb(173, 20, 87), 22f) { pokazKomisje() }, lpPelny(12))
 
         val odstep = View(this)
         ekranStart.addView(odstep, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -2535,6 +2556,234 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                 ton?.startTone(ToneGenerator.TONE_PROP_BEEP2, 300)
             }
         }
+    }
+
+
+    // ------------------------------------------------------------------
+    //  KOMISJA BHP - ocena realizacji zaleceń z poprzedniego protokołu
+    //  Komputer (nowy protokół -> "Na telefon") wysyła punkty, telefon pokazuje je po jednym,
+    //  oceny wracają do komputera przyciskiem "Z telefonu".
+    // ------------------------------------------------------------------
+    private fun lpKom(waga: Float, lewy: Int = 0): LinearLayout.LayoutParams {
+        val p = LinearLayout.LayoutParams(0, dp(64), waga)
+        p.leftMargin = dp(lewy)
+        return p
+    }
+
+    private fun zbudujKomisje() {
+        val kolor = Color.rgb(173, 20, 87)
+        ekranKom = LinearLayout(this)
+        ekranKom.orientation = LinearLayout.VERTICAL
+        ekranKom.setPadding(dp(12), dp(12), dp(12), dp(12))
+        ekranKom.setBackgroundColor(Color.rgb(245, 248, 252))
+
+        val w1 = wiersz()
+        w1.addView(przycisk("\u2190 Menu", szary) { pokazStart() })
+        w1.addView(tekst("  Komisja BHP", 22f, kolor, true), lp(1f))
+        w1.addView(przycisk("Zakończ", czerwony) { zakoncz() })
+        ekranKom.addView(w1)
+
+        tTytulKom = tekst("", 14f, szary)
+        tTytulKom.setPadding(0, dp(6), 0, 0)
+        ekranKom.addView(tTytulKom)
+        tLicznikKom = tekst("", 18f, kolor, true)
+        tLicznikKom.gravity = Gravity.CENTER
+        tLicznikKom.setPadding(0, dp(6), 0, dp(6))
+        ekranKom.addView(tLicznikKom)
+
+        val karta = LinearLayout(this)
+        karta.orientation = LinearLayout.VERTICAL
+        karta.setPadding(dp(16), dp(14), dp(16), dp(16))
+        val tlo = GradientDrawable()
+        tlo.cornerRadius = dp(16).toFloat()
+        tlo.setColor(Color.WHITE)
+        tlo.setStroke(dp(1), Color.rgb(220, 225, 232))
+        karta.background = tlo
+        tEtykKom = tekst("", 15f, szary, true)
+        karta.addView(tEtykKom)
+        tTrescKom = tekst("", 20f, Color.rgb(33, 33, 33))
+        tTrescKom.setLineSpacing(0f, 1.15f)
+        tTrescKom.setPadding(0, dp(8), 0, 0)
+        karta.addView(tTrescKom)
+        tStatusKom = tekst("", 17f, szary, true)
+        tStatusKom.setPadding(0, dp(14), 0, 0)
+        karta.addView(tStatusKom)
+        przewKom = ScrollView(this)
+        przewKom.addView(karta)
+        ekranKom.addView(przewKom, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        wOcenyKom = LinearLayout(this)
+        wOcenyKom.orientation = LinearLayout.VERTICAL
+        val w2 = wiersz()
+        w2.addView(przycisk("Wykonano", zielony, 18f) { ocenKom("W") }, lpKom(1f))
+        w2.addView(przycisk("Nie wykonano", czerwony, 18f) { ocenKom("N") }, lpKom(1f, 8))
+        wOcenyKom.addView(w2)
+        val w3 = wiersz()
+        w3.addView(przycisk("W trakcie realizacji", pomaranczowy, 16f) { ocenKom("T") }, lpKom(1f))
+        w3.addView(przycisk("Pomiń", szary, 18f) { ocenKom("P") }, lpKom(1f, 8))
+        val p3 = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        p3.topMargin = dp(8)
+        wOcenyKom.addView(w3, p3)
+        val p2 = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        p2.topMargin = dp(10)
+        ekranKom.addView(wOcenyKom, p2)
+
+        wNawKom = wiersz()
+        wNawKom.addView(przycisk("\u2190 Poprzedni", niebieski, 16f) { przejdzKom(-1) }, lpKom(1f))
+        wNawKom.addView(przycisk("Następny \u2192", niebieski, 16f) { przejdzKom(1) }, lpKom(1f, 8))
+        val p4 = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        p4.topMargin = dp(8)
+        ekranKom.addView(wNawKom, p4)
+
+        val f = File(folderKom, "lista.txt")
+        if (f.exists()) try { przetworzListeKom(f.readText(Charsets.UTF_8)) } catch (e: Exception) {}
+        val oc = ocenyKom()
+        biezacyKom = punktyKom.indexOfFirst { !oc.containsKey(it.nr) }.let { if (it < 0) punktyKom.size else it }
+    }
+
+    private fun pokazKomisje() {
+        zatrzymajKamere()
+        tryb = "KOMISJA"
+        setContentView(ekranKom)
+        pokazPunktKom()
+        pokazStan()
+    }
+
+    private fun przetworzListeKom(tekst: String) {
+        val linie = tekst.replace("\r", "").split("\n")
+        if (linie.isEmpty() || !linie[0].startsWith("KOM|")) return
+        val nag = linie[0].split("|")
+        val lst = mutableListOf<PunktKom>()
+        var nr = -1
+        var et = ""
+        var st = ""
+        val sb = StringBuilder()
+        for (l in linie.drop(1) + listOf("P|-1")) {
+            if (l.startsWith("P|")) {
+                if (nr >= 0) lst.add(PunktKom(nr, et, sb.toString().trim(), st))
+                val p = l.split("|")
+                nr = p.getOrNull(1)?.trim()?.toIntOrNull() ?: -1
+                et = polskie(p.getOrElse(2) { "" }.trim())
+                st = p.getOrElse(3) { "" }.trim()
+                sb.setLength(0)
+            } else if (l.startsWith("T|")) {
+                if (sb.isNotEmpty()) sb.append("\n")
+                sb.append(polskie(l.substring(2)))
+            }
+        }
+        idListyKom = nag.getOrElse(1) { "" }.trim()
+        tytulKom = polskie(nag.getOrElse(2) { "" }.trim())
+        punktyKom = lst
+    }
+
+    private fun ocenyKom(): MutableMap<Int, String> {
+        val wyn = linkedMapOf<Int, String>()
+        val f = File(folderKom, "oceny.txt")
+        if (f.exists()) for (l in f.readLines(Charsets.UTF_8)) {
+            val p = l.split("|")
+            val nr = p.getOrNull(0)?.trim()?.toIntOrNull() ?: continue
+            wyn[nr] = p.getOrElse(1) { "" }.trim()
+        }
+        return wyn
+    }
+
+    private fun zapiszOcenyKom(m: Map<Int, String>) {
+        try {
+            File(folderKom, "oceny.txt").writeText(m.entries.joinToString("\n") { "${it.key}|${it.value}" }, Charsets.UTF_8)
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun opisOcenyKom(k: String): String = when (k) {
+        "W" -> "wykonano"
+        "N" -> "nie wykonano"
+        "T" -> "w trakcie realizacji"
+        "P" -> "pominięty"
+        else -> "nie oceniono"
+    }
+
+    private fun kolorOcenyKom(k: String): Int = when (k) {
+        "W" -> zielony
+        "N" -> czerwony
+        "T" -> pomaranczowy
+        else -> szary
+    }
+
+    private fun pokazPunktKom() {
+        if (!::ekranKom.isInitialized) return
+        val oc = ocenyKom()
+        if (punktyKom.isEmpty()) {
+            tTytulKom.text = ""
+            tLicznikKom.text = "Brak listy"
+            tEtykKom.text = ""
+            tTrescKom.text = "Na komputerze otwórz nowy protokół Komisji BHP i kliknij \"Na telefon\" - punkty z poprzedniego protokołu pokażą się tutaj po jednym."
+            tStatusKom.text = ""
+            wOcenyKom.visibility = View.GONE
+            wNawKom.visibility = View.GONE
+            return
+        }
+        tTytulKom.text = tytulKom
+        wNawKom.visibility = View.VISIBLE
+        if (biezacyKom >= punktyKom.size) {
+            biezacyKom = punktyKom.size
+            wOcenyKom.visibility = View.GONE
+            tLicznikKom.text = "Koniec listy"
+            tEtykKom.text = "Ocenione: ${punktyKom.count { oc.containsKey(it.nr) }} z ${punktyKom.size}"
+            tTrescKom.text = punktyKom.joinToString("\n") { "${it.etyk}:  ${opisOcenyKom(oc[it.nr] ?: "")}" }
+            tStatusKom.text = "Na komputerze w protokole kliknij \"Z telefonu\" - oceny wejdą do listy."
+            tStatusKom.setTextColor(zielony)
+            przewKom.scrollTo(0, 0)
+            return
+        }
+        if (biezacyKom < 0) biezacyKom = 0
+        wOcenyKom.visibility = View.VISIBLE
+        val p = punktyKom[biezacyKom]
+        tLicznikKom.text = "Punkt ${biezacyKom + 1} z ${punktyKom.size}"
+        tEtykKom.text = p.etyk
+        tTrescKom.text = p.tekst
+        val o = oc[p.nr]
+        tStatusKom.text = when {
+            o != null -> "Twoja ocena: ${opisOcenyKom(o)}"
+            p.stary.isNotBlank() -> "W komputerze: ${opisOcenyKom(p.stary)}"
+            else -> "Jeszcze nie oceniono"
+        }
+        tStatusKom.setTextColor(kolorOcenyKom(o ?: p.stary))
+        przewKom.scrollTo(0, 0)
+    }
+
+    private fun ocenKom(k: String) {
+        if (biezacyKom !in punktyKom.indices) return
+        val oc = ocenyKom()
+        oc[punktyKom[biezacyKom].nr] = k
+        zapiszOcenyKom(oc)
+        ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
+        biezacyKom++
+        pokazPunktKom()
+    }
+
+    private fun przejdzKom(o: Int) {
+        biezacyKom = (biezacyKom + o).coerceIn(0, punktyKom.size)
+        pokazPunktKom()
+    }
+
+    // serwer: POST /komisja  "KOM|id|tytuł" + linie "P|nr|etykieta|stary status (W/N/T/P)" i "T|wiersz treści"
+    override fun komisja(tekst: String) {
+        val stareId = idListyKom
+        try { File(folderKom, "lista.txt").writeText(tekst, Charsets.UTF_8) } catch (e: Exception) {}
+        przetworzListeKom(tekst)
+        if (idListyKom != stareId) zapiszOcenyKom(emptyMap())
+        runOnUiThread {
+            biezacyKom = 0
+            pokazKomisje()
+            Toast.makeText(this, "Komisja BHP: ${punktyKom.size} punktów do oceny", Toast.LENGTH_LONG).show()
+            ton?.startTone(ToneGenerator.TONE_PROP_BEEP2, 300)
+        }
+    }
+
+    // serwer: GET /komisja_oceny  -> "KOO|id|ile" + linie "nr|W/N/T/P"
+    override fun komisjaOceny(): String {
+        val oc = ocenyKom()
+        return "KOO|$idListyKom|${oc.size}" + oc.entries.joinToString("") { "\n${it.key}|${it.value}" }
     }
 
     // ------------------------------------------------------------------

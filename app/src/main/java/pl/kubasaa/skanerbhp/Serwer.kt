@@ -32,6 +32,8 @@ import java.util.concurrent.Executors
  *   POST /maszyny_odebrane -> "id,id" komputer zapisał połączenia
  *   POST /sms             -> "numer\ntreść" - telefon wysyła SMS (np. hasło do pliku z danymi osobowymi);
  *                            odpowiedź: OK | OTWARTO (bez zgody na SMS: otwarte Wiadomości z gotowym tekstem) | BLAD|opis
+ *   POST /komisja         -> "KOM|id|tytuł" + "P|nr|etykieta|status" + "T|treść" - punkty do oceny (Komisja BHP)
+ *   GET  /komisja_oceny   -> "KOO|id|ile" + linie "nr|W/N/T/P" - oceny zrobione w telefonie
  */
 class Serwer(private val obsluga: Obsluga) {
 
@@ -58,6 +60,8 @@ class Serwer(private val obsluga: Obsluga) {
         fun stan(): String
         fun chemiaWyniki(tekst: String)
         fun zdjeciaSprawy(tekst: String)
+        fun komisja(tekst: String)
+        fun komisjaOceny(): String
     }
 
     @Volatile private var gniazdo: ServerSocket? = null
@@ -179,6 +183,8 @@ class Serwer(private val obsluga: Obsluga) {
                 sciezka == "/maszyny" && metoda == "POST" -> { obsluga.maszyny(cialo); "OK" }
                 sciezka == "/maszyny_powiazania" -> obsluga.maszynyPowiazania()
                 sciezka == "/maszyny_odebrane" && metoda == "POST" -> { obsluga.maszynyOdebrane(cialo); "OK" }
+                sciezka == "/komisja" && metoda == "POST" -> { obsluga.komisja(cialo); "OK" }
+                sciezka == "/komisja_oceny" -> obsluga.komisjaOceny()
                 sciezka == "/" -> "Skaner BHP - połączenie działa ✔"
                 else -> "?"
             }
