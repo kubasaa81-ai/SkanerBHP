@@ -2580,8 +2580,11 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
 
         val w1 = wiersz()
         w1.addView(przycisk("\u2190 Menu", szary) { pokazStart() })
-        w1.addView(tekst("  Komisja BHP", 22f, kolor, true), lp(1f))
-        w1.addView(przycisk("Zakończ", czerwony) { zakoncz() })
+        w1.addView(tekst("  Komisja BHP", 20f, kolor, true), lp(1f))
+        w1.addView(przycisk("Odśwież", niebieski) { odswiezKom() })
+        val pz = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        pz.leftMargin = dp(6)
+        w1.addView(przycisk("Zakończ", czerwony) { zakoncz() }, pz)
         ekranKom.addView(w1)
 
         tTytulKom = tekst("", 14f, szary)
@@ -2717,7 +2720,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             tTytulKom.text = ""
             tLicznikKom.text = "Brak listy"
             tEtykKom.text = ""
-            tTrescKom.text = "Lista jeszcze nie przyszła - otwórz Program BHP na komputerze (GlobalProtect włączony), punkty z ostatniego protokołu przyjdą same."
+            tTrescKom.text = if (idListyKom == "R") "Czekam na dane z komputera... (Program BHP otwarty, GlobalProtect włączony - przyjdą same w kilka sekund)"
+                else "Lista jeszcze nie przyszła - otwórz Program BHP na komputerze (GlobalProtect włączony), punkty z ostatniego protokołu przyjdą same."
             tStatusKom.text = ""
             wOcenyKom.visibility = View.GONE
             wNawKom.visibility = View.GONE
@@ -2751,6 +2755,22 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         }
         tStatusKom.setTextColor(kolorOcenyKom(o ?: p.stary))
         przewKom.scrollTo(0, 0)
+    }
+
+    // Odśwież: kasuje oceny w telefonie i prosi komputer o listę od nowa ("R" w /stan - komputer kasuje też swoje oceny z telefonu)
+    private fun odswiezKom() {
+        okno("Odświeżyć dane?", "Oceny zrobione w telefonie zostaną skasowane (także te już przesłane do komputera), " +
+                "a punkty przyjdą z komputera od nowa.", null,
+            listOf(Triple("Odśwież", niebieski) {
+                zapiszOcenyKom(emptyMap())
+                try { File(folderKom, "lista.txt").delete() } catch (e: Exception) {}
+                punktyKom = emptyList()
+                tytulKom = ""
+                idListyKom = "R"
+                biezacyKom = 0
+                pokazPunktKom()
+                Toast.makeText(this, "Czekam na dane z komputera...", Toast.LENGTH_LONG).show()
+            }, Triple("Anuluj", szary) {}), {})
     }
 
     private fun ocenKom(k: String) {
