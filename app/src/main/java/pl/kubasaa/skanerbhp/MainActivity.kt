@@ -2117,7 +2117,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     override fun stan(): String {
         ostatnieTlo = SystemClock.elapsedRealtime()
         runOnUiThread { pokazStan() }
-        return "STAN|$tryb|$wersjaListyChem|${zdjeciaChem().size}|$wersjaListyM|${powiazaniaMasz().size}|$wersjaSprawWyp|${plikiZdjec().size}"
+        return "STAN|$tryb|$wersjaListyChem|${zdjeciaChem().size}|$wersjaListyM|${powiazaniaMasz().size}|$wersjaSprawWyp|${plikiZdjec().size}" +
+            "|${idListyKom.ifBlank { "0" }}|${licznikOcenKom()}"
     }
 
     private fun zrobZdjecieChem() {
@@ -2561,8 +2562,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
 
     // ------------------------------------------------------------------
     //  KOMISJA BHP - ocena realizacji zaleceń z poprzedniego protokołu
-    //  Komputer (nowy protokół -> "Na telefon") wysyła punkty, telefon pokazuje je po jednym,
-    //  oceny wracają do komputera przyciskiem "Z telefonu".
+    //  Program BHP otwarty sam wysyła punkty z ostatniego protokołu (w tle, jak chemia i maszyny),
+    //  telefon pokazuje je po jednym, oceny same wracają do komputera.
     // ------------------------------------------------------------------
     private fun lpKom(waga: Float, lewy: Int = 0): LinearLayout.LayoutParams {
         val p = LinearLayout.LayoutParams(0, dp(64), waga)
@@ -2716,7 +2717,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             tTytulKom.text = ""
             tLicznikKom.text = "Brak listy"
             tEtykKom.text = ""
-            tTrescKom.text = "Na komputerze otwórz nowy protokół Komisji BHP i kliknij \"Na telefon\" - punkty z poprzedniego protokołu pokażą się tutaj po jednym."
+            tTrescKom.text = "Lista jeszcze nie przyszła - otwórz Program BHP na komputerze (GlobalProtect włączony), punkty z ostatniego protokołu przyjdą same."
             tStatusKom.text = ""
             wOcenyKom.visibility = View.GONE
             wNawKom.visibility = View.GONE
@@ -2730,7 +2731,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             tLicznikKom.text = "Koniec listy"
             tEtykKom.text = "Ocenione: ${punktyKom.count { oc.containsKey(it.nr) }} z ${punktyKom.size}"
             tTrescKom.text = punktyKom.joinToString("\n") { "${it.etyk}:  ${opisOcenyKom(oc[it.nr] ?: "")}" }
-            tStatusKom.text = "Na komputerze w protokole kliknij \"Z telefonu\" - oceny wejdą do listy."
+            tStatusKom.text = if (tloWidziane() || komputerWidziany()) "\u2714 Program BHP otwarty - oceny idą do komputera same"
+                else "Oceny czekają w telefonie - pójdą same po otwarciu Programu BHP"
             tStatusKom.setTextColor(zielony)
             przewKom.scrollTo(0, 0)
             return
@@ -2766,18 +2768,32 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         pokazPunktKom()
     }
 
+    // licznik zmian ocen (czas ostatniej oceny) - komputer pobiera oceny, gdy się zmieni
+    private fun licznikOcenKom(): Long {
+        val f = File(folderKom, "oceny.txt")
+        return if (f.exists() && f.length() > 0) f.lastModified() / 1000 else 0
+    }
+
     // serwer: POST /komisja  "KOM|id|tytuł" + linie "P|nr|etykieta|stary status (W/N/T/P)" i "T|wiersz treści"
+    //  (wysyła Program BHP w tle, gdy w telefonie jest inna lista; nowa lista = oceny od nowa)
     override fun komisja(tekst: String) {
         val stareId = idListyKom
         try { File(folderKom, "lista.txt").writeText(tekst, Charsets.UTF_8) } catch (e: Exception) {}
-        przetworzListeKom(tekst)
-        if (idListyKom != stareId) zapiszOcenyKom(emptyMap())
+        val nowa = przetworzListeKomZmiana(tekst, stareId)
         runOnUiThread {
-            biezacyKom = 0
-            pokazKomisje()
-            Toast.makeText(this, "Komisja BHP: ${punktyKom.size} punktów do oceny", Toast.LENGTH_LONG).show()
-            ton?.startTone(ToneGenerator.TONE_PROP_BEEP2, 300)
+            if (nowa) biezacyKom = 0
+            if (tryb == "KOMISJA") {
+                pokazPunktKom()
+                if (nowa) Toast.makeText(this, "Komisja BHP: nowa lista - ${punktyKom.size} punktów", Toast.LENGTH_LONG).show()
+            }
         }
+    }
+
+    private fun przetworzListeKomZmiana(tekst: String, stareId: String): Boolean {
+        przetworzListeKom(tekst)
+        val nowa = idListyKom != stareId
+        if (nowa) zapiszOcenyKom(emptyMap())
+        return nowa
     }
 
     // serwer: GET /komisja_oceny  -> "KOO|id|ile" + linie "nr|W/N/T/P"
