@@ -86,6 +86,7 @@ import kotlin.system.exitProcess
  *   komputer pobiera przypisania (Pomiary -> Maszyny w pomiarach -> "Połączenia z telefonu").
  * Kontrola maszyny: Program BHP wysyła kontrole w toku z pytaniami (lista kontrolna, zakres) - telefon pokazuje
  *   jedno pytanie na ekranie (TAK / NIE / NIE DOTYCZY, przy złej odpowiedzi uwagi ze słownika), odpowiedzi idą do bazy same.
+ *   Z telefonu też: nowa kontrola (maszyna z kartoteki, przyczyna, data) i poprawa danych maszyny (nr wewn., rok budowy...).
  * Komisja BHP: komputer wysyła punkty z poprzedniego protokołu, telefon pokazuje je po jednym
  *   (Wykonano / Nie wykonano / W trakcie / Pomiń), komputer pobiera oceny ("Z telefonu").
  * Zdjęcia (wypadki): zdjęcia zrobione zwykłym aparatem wybierasz z galerii (podgląd, opis każdego) -
@@ -297,7 +298,12 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private class PytanieKon(val idK: Int, val czesc: String, val poz: Int, val kod: String, val prawid: String,
                              val naglowek: String, val tresc: String, val wskaz: String, val slownik: List<String>,
                              val odpPc: String, val uwagiPc: String)
-    private class KontrolaKon(val id: Int, val maszyna: String, val opis: String, val pytania: MutableList<PytanieKon>)
+    private class KontrolaKon(val id: Int, val maszyna: String, val opis: String, val pytania: MutableList<PytanieKon>, val idM: Int = 0)
+    private class MaszynaKon(val id: Int, var nazwa: String, val nrInw: String, var nrWewn: String, var wydz: String, var typ: String,
+                             var prod: String, var rok: String, var lokal: String, var odpow: String, var uwagi: String, val ostatnia: String)
+    private var maszynyKon: List<MaszynaKon> = emptyList()
+    private var przyczynyKon: List<Pair<String, String>> = emptyList()
+    private var wydzialyKon: List<Pair<String, String>> = emptyList()
     private class BudowaPytKon(val idK: Int, val czesc: String, val poz: Int, val kod: String, val prawid: String,
                                val odp: String, val nagl: String) {
         val tresc = StringBuilder()
@@ -310,6 +316,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     @Volatile private var wersjaKon = ""
     private var aktKon: KontrolaKon? = null
     private var biezKon = 0
+    private var widokKon = "lista"          // lista / pytanie / maszyny / maszyna - odświeżanie z komputera tylko listy i pytania
     private val kolorKon = Color.rgb(69, 90, 100)
     private val folderKon: File by lazy { File(filesDir, "kontrole").apply { mkdirs() } }
     private lateinit var ekranKon: LinearLayout
@@ -2888,6 +2895,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     }
 
     private fun pokazListeKon() {
+        widokKon = "lista"
         trescKon.removeAllViews()
         aktKon = null
         naglowekKon("Kontrola maszyny", "← Menu") { pokazStart() }
@@ -2899,9 +2907,18 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             if (tloWidziane() || komputerWidziany()) zielony else pomaranczowy)
         st.setPadding(0, dp(8), 0, dp(8))
         trescKon.addView(st)
+        val bNowa = przycisk("+ Nowa kontrola  /  dane maszyny", Color.rgb(0, 121, 107), 18f) { pokazMaszynyKon() }
+        trescKon.addView(bNowa, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58)))
         val przew = ScrollView(this)
         val lista = LinearLayout(this)
         lista.orientation = LinearLayout.VERTICAL
+        for (z in zleceniaKon().filter { it[0] == "N" }) {
+            val mz = maszynyKon.firstOrNull { it.id.toString() == z[2] }
+            val t = tekst("⏳ Zakładana: ${mz?.nazwa ?: "maszyna ${z[2]}"} - ${z[3]}
+(czeka na Program BHP)", 16f, pomaranczowy, true)
+            t.setPadding(0, dp(10), 0, 0)
+            lista.addView(t)
+        }
         if (kontroleKon.isEmpty()) {
             lista.addView(tekst(if (wersjaKon.isBlank()) "Lista kontroli jeszcze nie przyszła - otwórz Program BHP na komputerze (GlobalProtect włączony)."
                 else "Nie ma kontroli w toku. Załóż kontrolę w Programie BHP (Maszyny -> Kontrola maszyny -> Nowa kontrola) - pojawi się tu sama.", 17f, szary))
@@ -2939,12 +2956,17 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         biezKon = biezKon.coerceIn(0, k.pytania.size - 1)
         val p = k.pytania[biezKon]
         val (odp, uwagi) = odpKon(p)
+        widokKon = "pytanie"
         trescKon.removeAllViews()
         naglowekKon(k.maszyna, "← Lista") { pokazListeKon() }
         val ileOdp = k.pytania.count { odpKon(it).first.isNotEmpty() }
         val licz = tekst("${p.kod}   |   pytanie ${biezKon + 1} z ${k.pytania.size}   |   odpowiedzi $ileOdp", 15f, kolorKon, true)
         licz.setPadding(0, dp(6), 0, dp(2))
-        trescKon.addView(licz)
+        val wl = wiersz()
+        wl.addView(licz, lp(1f))
+        val mk = maszynyKon.firstOrNull { it.id == k.idM }
+        if (mk != null) wl.addView(przycisk("Dane maszyny", kolorKon, 13f) { pokazMaszyneKon(mk) { pokazPytanieKon() } })
+        trescKon.addView(wl)
         trescKon.addView(tekst(p.naglowek, 13f, szary))
 
         val karta = LinearLayout(this)
@@ -3117,6 +3139,9 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         val linie = tekst.replace("\r", "").split("\n")
         if (linie.isEmpty() || !linie[0].startsWith("KON|")) return
         val lista = mutableListOf<KontrolaKon>()
+        val masz = mutableListOf<MaszynaKon>()
+        val prz = mutableListOf<Pair<String, String>>()
+        val wyd = mutableListOf<Pair<String, String>>()
         var k: KontrolaKon? = null
         var b: BudowaPytKon? = null
         fun zamknij() {
@@ -3130,7 +3155,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             when (p[0]) {
                 "K" -> {
                     zamknij()
-                    k = KontrolaKon(p.getOrElse(1) { "0" }.toIntOrNull() ?: 0, polskie(p.getOrElse(2) { "" }), polskie(p.getOrElse(3) { "" }), mutableListOf())
+                    k = KontrolaKon(p.getOrElse(1) { "0" }.toIntOrNull() ?: 0, polskie(p.getOrElse(2) { "" }), polskie(p.getOrElse(3) { "" }), mutableListOf(),
+                        p.getOrElse(4) { "0" }.toIntOrNull() ?: 0)
                     lista.add(k!!)
                 }
                 "P" -> {
@@ -3142,11 +3168,21 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                 "W" -> b?.let { if (it.wskaz.isNotEmpty()) it.wskaz.append("\n"); it.wskaz.append(polskie(l.substring(2))) }
                 "S" -> b?.slownik?.add(polskie(l.substring(2)))
                 "U" -> b?.let { it.uwagi = polskie(l.substring(2)) }
+                "M" -> masz.add(MaszynaKon(p.getOrElse(1) { "0" }.toIntOrNull() ?: 0, polskie(p.getOrElse(2) { "" }), polskie(p.getOrElse(3) { "" }),
+                    polskie(p.getOrElse(4) { "" }), polskie(p.getOrElse(5) { "" }), polskie(p.getOrElse(6) { "" }), polskie(p.getOrElse(7) { "" }),
+                    p.getOrElse(8) { "" }, polskie(p.getOrElse(9) { "" }), polskie(p.getOrElse(10) { "" }), polskie(p.getOrElse(11) { "" }),
+                    polskie(p.getOrElse(12) { "" })))
+                "R" -> prz.add(Pair(polskie(p.getOrElse(1) { "" }), polskie(p.getOrElse(2) { "" })))
+                "D" -> wyd.add(Pair(polskie(p.getOrElse(1) { "" }), polskie(p.getOrElse(2) { "" })))
             }
         }
         zamknij()
         wersjaKon = linie[0].substring(4).trim()
         kontroleKon = lista
+        maszynyKon = masz
+        przyczynyKon = prz
+        wydzialyKon = wyd
+        nalozZmianyKon()
     }
 
     // serwer: POST /kontrole  (wysyła Program BHP w tle, gdy lista w telefonie jest inna)
@@ -3154,7 +3190,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         try { File(folderKon, "lista.txt").writeText(tekst, Charsets.UTF_8) } catch (e: Exception) {}
         przetworzListeKon(tekst)
         runOnUiThread {
-            if (tryb == "KONTROLA") {
+            if (tryb == "KONTROLA" && (widokKon == "lista" || widokKon == "pytanie")) {
                 val a = aktKon
                 if (a == null) {
                     pokazListeKon()
@@ -3179,9 +3215,10 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     // serwer: GET /kontrole_odp  -> "KOD|ile" + linie "sekw|idK|czesc|poz|odp|uwagi|własna" (polskie litery jako ~a)
     override fun kontroleOdp(): String {
         val m = odpowiedziKon()
-        return "KOD|${m.size}" + m.values.joinToString("") {
+        val z = zleceniaKon()
+        return "KOD|${m.size + z.size}" + m.values.joinToString("") {
             "\n${it.sekw}|${it.klucz}|${it.odp}|${doKomputera(it.uwagi)}|${doKomputera(it.wlasna)}"
-        }
+        } + z.joinToString("") { "\n${it[0]}|${it[1]}|${it[2]}|${doKomputera(it[3])}|${doKomputera(it[4])}" }
     }
 
     // serwer: POST /kontrole_odebrane  "sekw,sekw,..." - zapisane w bazie, usuń z telefonu
@@ -3192,9 +3229,230 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         val m = odpowiedziKon()
         val zostaja = m.filterValues { !zap.contains(it.sekw) }
         zapiszWszystkieOdpKon(zostaja)
+        val z = zleceniaKon()
+        if (z.any { zap.contains(it[1]) }) zapiszZleceniaKon(z.filter { !zap.contains(it[1]) })
     }
 
-    private fun ileOdpKon(): Int = try { odpowiedziKon().size } catch (e: Exception) { 0 }
+    private fun ileOdpKon(): Int = try { odpowiedziKon().size + zleceniaKon().size } catch (e: Exception) { 0 }
+
+    // ---- MASZYNY: nowa kontrola z telefonu i zmiana danych maszyny (zlecenia czekają w telefonie jak odpowiedzi)
+    //  plik zlecenia.txt:  "N|sekw|idM|przyczyna|data ISO"  (nowa kontrola)   "E|sekw|idM|pole|wartość"  (zmiana danych maszyny)
+    private fun zleceniaKon(): MutableList<List<String>> {
+        val wyn = mutableListOf<List<String>>()
+        val f = File(folderKon, "zlecenia.txt")
+        if (f.exists()) for (l in f.readLines(Charsets.UTF_8)) {
+            val p = l.split("|")
+            if (p.size >= 5 && (p[0] == "N" || p[0] == "E")) wyn.add(p.take(5))
+        }
+        return wyn
+    }
+
+    private fun zapiszZleceniaKon(lista: List<List<String>>) {
+        try {
+            File(folderKon, "zlecenia.txt").writeText(lista.joinToString("\n") { it.joinToString("|") }, Charsets.UTF_8)
+        } catch (e: Exception) {
+        }
+    }
+
+    @Synchronized
+    private fun dodajZlecenieKon(rodzaj: String, idM: Int, a: String, b: String) {
+        val l = zleceniaKon()
+        val czyste = { s: String -> s.replace("|", "/").replace("\n", " ").replace("\r", " ") }
+        // ta sama zmiana pola jeszcze niewysłana - zostaje najnowsza
+        if (rodzaj == "E") l.removeAll { it[0] == "E" && it[2] == idM.toString() && it[3] == a }
+        l.add(listOf(rodzaj, System.currentTimeMillis().toString() + (l.size % 100).toString().padStart(2, '0'), idM.toString(), czyste(a), czyste(b)))
+        zapiszZleceniaKon(l)
+    }
+
+    // zmiany danych czekające w telefonie - nałożone na listę maszyn z komputera
+    private fun nalozZmianyKon() {
+        for (z in zleceniaKon()) {
+            if (z[0] != "E") continue
+            val m = maszynyKon.firstOrNull { it.id.toString() == z[2] } ?: continue
+            ustawPoleMaszynyKon(m, z[3], z[4])
+        }
+    }
+
+    private fun ustawPoleMaszynyKon(m: MaszynaKon, pole: String, w: String) {
+        when (pole) {
+            "nazwa" -> m.nazwa = w
+            "typ" -> m.typ = w
+            "producent_typ" -> m.prod = w
+            "nr_wewnetrzny" -> m.nrWewn = w
+            "rok_budowy" -> m.rok = w
+            "lokalizacja" -> m.lokal = w
+            "odpowiedzialny" -> m.odpow = w
+            "uwagi" -> m.uwagi = w
+            "wydzial" -> m.wydz = w
+        }
+    }
+
+    // wybór maszyny: szukanie po nazwie / numerach / wydziale
+    private fun pokazMaszynyKon() {
+        widokKon = "maszyny"
+        trescKon.removeAllViews()
+        aktKon = null
+        naglowekKon("Wybierz maszynę", "← Lista") { pokazListeKon() }
+        val ed = EditText(this)
+        ed.hint = "Szukaj: nazwa, nr inw., nr wewn., wydział"
+        ed.textSize = 18f
+        ed.setSingleLine()
+        trescKon.addView(ed)
+        val przew = ScrollView(this)
+        val lista = LinearLayout(this)
+        lista.orientation = LinearLayout.VERTICAL
+        przew.addView(lista)
+        trescKon.addView(przew, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        fun wypelnij(szuk: String) {
+            lista.removeAllViews()
+            val s = szuk.trim().lowercase()
+            val pasuje = maszynyKon.filter {
+                s.isEmpty() || "${it.nazwa} ${it.nrInw} ${it.nrWewn} ${it.wydz} ${it.typ}".lowercase().contains(s)
+            }
+            if (maszynyKon.isEmpty()) lista.addView(tekst("Lista maszyn jeszcze nie przyszła - otwórz Program BHP na komputerze.", 17f, szary))
+            for (m in pasuje.take(80)) {
+                val b = przycisk("${m.nazwa}\nnr inw. ${m.nrInw}" + (if (m.nrWewn.isNotBlank()) "  |  nr wewn. ${m.nrWewn}" else "") +
+                    (if (m.wydz.isNotBlank()) "  |  ${m.wydz}" else "") + (if (m.ostatnia.isNotBlank()) "\nostatnia kontrola: ${m.ostatnia}" else ""),
+                    kolorKon, 16f) { pokazMaszyneKon(m) { pokazMaszynyKon() } }
+                b.gravity = Gravity.START or Gravity.CENTER_VERTICAL
+                val p = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                p.topMargin = dp(8)
+                lista.addView(b, p)
+            }
+            if (pasuje.size > 80) lista.addView(tekst("... i ${pasuje.size - 80} więcej - zawęź szukanie", 15f, szary))
+        }
+        ed.addTextChangedListener(object : android.text.TextWatcher {
+            override fun afterTextChanged(e: android.text.Editable?) { wypelnij(e?.toString() ?: "") }
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+        })
+        wypelnij("")
+    }
+
+    // dane maszyny (do poprawy) + założenie nowej kontroli
+    private fun pokazMaszyneKon(m: MaszynaKon, wroc: () -> Unit) {
+        widokKon = "maszyna"
+        trescKon.removeAllViews()
+        naglowekKon("Maszyna", "← Wstecz") { wroc() }
+        val przew = ScrollView(this)
+        val k = LinearLayout(this)
+        k.orientation = LinearLayout.VERTICAL
+        k.setPadding(0, dp(6), 0, dp(12))
+        k.addView(tekst("nr inw. ${m.nrInw}", 15f, szary, true))
+        val pola = linkedMapOf<String, EditText>()
+        fun pole(etyk: String, klucz: String, wart: String, liczba: Boolean = false) {
+            val t = tekst(etyk, 14f, kolorKon, true)
+            t.setPadding(0, dp(10), 0, 0)
+            k.addView(t)
+            val e = EditText(this)
+            e.setText(wart)
+            e.textSize = 18f
+            e.inputType = if (liczba) InputType.TYPE_CLASS_NUMBER else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            k.addView(e)
+            pola[klucz] = e
+        }
+        pole("Nazwa", "nazwa", m.nazwa)
+        pole("Typ", "typ", m.typ)
+        pole("Producent / model", "producent_typ", m.prod)
+        pole("Nr wewnętrzny", "nr_wewnetrzny", m.nrWewn)
+        pole("Rok budowy (produkcji)", "rok_budowy", m.rok, true)
+        pole("Lokalizacja", "lokalizacja", m.lokal)
+        pole("Odpowiedzialny", "odpowiedzialny", m.odpow)
+        pole("Uwagi", "uwagi", m.uwagi)
+        val tw = tekst("Wydział", 14f, kolorKon, true)
+        tw.setPadding(0, dp(10), 0, 0)
+        k.addView(tw)
+        val spW = Spinner(this)
+        val opW = listOf("(bez zmiany: ${m.wydz.ifBlank { "brak" }})") + wydzialyKon.map { "${it.first}  ${it.second}" }
+        spW.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, opW)
+        k.addView(spW)
+        val bz = przycisk("Zapisz dane maszyny", niebieski, 18f) {
+            var ile = 0
+            for ((klucz, e) in pola) {
+                val nowa = e.text.toString().trim()
+                val stara = when (klucz) {
+                    "nazwa" -> m.nazwa; "typ" -> m.typ; "producent_typ" -> m.prod; "nr_wewnetrzny" -> m.nrWewn
+                    "rok_budowy" -> m.rok; "lokalizacja" -> m.lokal; "odpowiedzialny" -> m.odpow; else -> m.uwagi
+                }
+                if (klucz == "rok_budowy" && nowa.isNotEmpty() && (nowa.length != 4 || nowa.toIntOrNull() == null)) {
+                    Toast.makeText(this, "Rok budowy wpisz 4 cyframi, np. 2015", Toast.LENGTH_LONG).show()
+                    return@przycisk
+                }
+                if (klucz == "nazwa" && nowa.isEmpty()) {
+                    Toast.makeText(this, "Nazwa maszyny nie może być pusta", Toast.LENGTH_LONG).show()
+                    return@przycisk
+                }
+                if (nowa != stara.trim()) {
+                    dodajZlecenieKon("E", m.id, klucz, nowa)
+                    ustawPoleMaszynyKon(m, klucz, nowa)
+                    ile++
+                }
+            }
+            if (spW.selectedItemPosition > 0) {
+                val kod = wydzialyKon[spW.selectedItemPosition - 1].first
+                if (kod != m.wydz) {
+                    dodajZlecenieKon("E", m.id, "wydzial", kod)
+                    m.wydz = kod
+                    ile++
+                }
+            }
+            Toast.makeText(this, if (ile > 0) "Zmienione pola: $ile - pójdą do bazy same" else "Bez zmian", Toast.LENGTH_LONG).show()
+            if (ile > 0) pokazMaszyneKon(m, wroc)
+        }
+        val pz = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58))
+        pz.topMargin = dp(12)
+        k.addView(bz, pz)
+
+        // nowa kontrola
+        val tn = tekst("Nowa kontrola tej maszyny", 18f, Color.rgb(0, 121, 107), true)
+        tn.setPadding(0, dp(22), 0, dp(4))
+        k.addView(tn)
+        if (m.ostatnia.isNotBlank()) k.addView(tekst("Ostatnia: ${m.ostatnia}", 15f,
+            if (m.ostatnia.contains("przekazana")) szary else pomaranczowy))
+        val tp = tekst("Przyczyna", 14f, kolorKon, true)
+        tp.setPadding(0, dp(8), 0, 0)
+        k.addView(tp)
+        val spP = Spinner(this)
+        spP.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item,
+            przyczynyKon.map { "${it.first}  (${it.second})" })
+        k.addView(spP)
+        val td = tekst("Data kontroli (DD.MM.RRRR)", 14f, kolorKon, true)
+        td.setPadding(0, dp(8), 0, 0)
+        k.addView(td)
+        val edD = EditText(this)
+        val c = java.util.Calendar.getInstance()
+        edD.setText(String.format("%02d.%02d.%04d", c.get(java.util.Calendar.DAY_OF_MONTH), c.get(java.util.Calendar.MONTH) + 1, c.get(java.util.Calendar.YEAR)))
+        edD.textSize = 18f
+        edD.inputType = InputType.TYPE_CLASS_DATETIME
+        k.addView(edD)
+        val bn = przycisk("Załóż kontrolę", Color.rgb(0, 121, 107), 18f) {
+            if (przyczynyKon.isEmpty()) {
+                Toast.makeText(this, "Brak listy przyczyn - otwórz Program BHP", Toast.LENGTH_LONG).show()
+                return@przycisk
+            }
+            val dt = Regex("^(\\d{1,2})\\.(\\d{1,2})\\.(\\d{4})$").find(edD.text.toString().trim())
+            if (dt == null) {
+                Toast.makeText(this, "Datę wpisz jako DD.MM.RRRR", Toast.LENGTH_LONG).show()
+                return@przycisk
+            }
+            val iso = "${dt.groupValues[3]}-${dt.groupValues[2].padStart(2, '0')}-${dt.groupValues[1].padStart(2, '0')}"
+            val prz = przyczynyKon[spP.selectedItemPosition.coerceAtLeast(0)]
+            val zaloz = {
+                dodajZlecenieKon("N", m.id, prz.first, iso)
+                Toast.makeText(this, "Kontrola założy się w Programie BHP i za kilka sekund będzie na liście", Toast.LENGTH_LONG).show()
+                pokazListeKon()
+            }
+            if (m.ostatnia.isNotBlank() && !m.ostatnia.contains("przekazana")) {
+                okno("Maszyna ma niezakończoną kontrolę", "Ostatnia: ${m.ostatnia}\nZałożyć mimo to kolejną (${prz.second})?", null,
+                    listOf(Triple("Załóż", Color.rgb(0, 121, 107)) { zaloz() }, Triple("Anuluj", szary) {}), {})
+            } else zaloz()
+        }
+        val pn = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58))
+        pn.topMargin = dp(12)
+        k.addView(bn, pn)
+        przew.addView(k)
+        trescKon.addView(przew, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+    }
 
     // polskie litery -> ~a ~c ... (jak lista z komputera, tylko w drugą stronę)
     private fun doKomputera(s: String): String {
