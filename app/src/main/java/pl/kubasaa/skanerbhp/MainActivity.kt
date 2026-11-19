@@ -2914,8 +2914,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         lista.orientation = LinearLayout.VERTICAL
         for (z in zleceniaKon().filter { it[0] == "N" }) {
             val mz = maszynyKon.firstOrNull { it.id.toString() == z[2] }
-            val t = tekst("⏳ Zakładana: ${mz?.nazwa ?: "maszyna ${z[2]}"} - ${z[3]}
-(czeka na Program BHP)", 16f, pomaranczowy, true)
+            val t = tekst("⏳ Zakładana: ${mz?.nazwa ?: "maszyna ${z[2]}"} - ${z[3]}\n(czeka na Program BHP)", 16f, pomaranczowy, true)
             t.setPadding(0, dp(10), 0, 0)
             lista.addView(t)
         }
