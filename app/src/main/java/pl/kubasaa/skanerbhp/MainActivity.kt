@@ -423,6 +423,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         zbudujMaszyny()
         zbudujKomisje()
         zbudujKontrole()
+        zbudujMaszynyMenu()
         pokazStart()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
             prosbaSms.launch(Manifest.permission.SEND_SMS)
@@ -434,6 +435,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                 "MENU" -> moveTaskToBack(true)
                 "WYDANIE", "DOSTAWA", "INWENTURA", "KODY" -> pokazOdziez()
                 "CHEMIA" -> pokazChemiaMenu()
+                "MASZYNY" -> pokazMaszynyMenu()
+                "KONTROLA" -> if (widokKon == "lista") pokazMaszynyMenu() else pokazListeKon()
                 else -> pokazStart()
             }
         }
@@ -526,12 +529,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         ekranStart.addView(przycisk("Odzież i ŚOI", Color.rgb(46, 125, 50), 24f) { pokazOdziez() }, lpPelny(18))
         ekranStart.addView(przycisk("Wypadki - zdjęcia", Color.rgb(198, 40, 40), 22f) { pokazZdjecia() }, lpPelny(12))
         ekranStart.addView(przycisk("Chemia", Color.rgb(106, 27, 154), 22f) { pokazChemiaMenu() }, lpPelny(12))
-        val wMasz = wiersz()
-        wMasz.addView(przycisk("Maszyny - pomiary", Color.rgb(69, 90, 100), 18f) { pokazMaszyny() }, LinearLayout.LayoutParams(0, dp(64), 1f))
-        val pKon = LinearLayout.LayoutParams(0, dp(64), 1f)
-        pKon.leftMargin = dp(8)
-        wMasz.addView(przycisk("Kontrola maszyny", Color.rgb(0, 121, 107), 18f) { pokazKontrole() }, pKon)
-        ekranStart.addView(wMasz, lpPelny(12))
+        ekranStart.addView(przycisk("Maszyny", Color.rgb(69, 90, 100), 22f) { pokazMaszynyMenu() }, lpPelny(12))
         ekranStart.addView(przycisk("Komisja BHP - zalecenia", Color.rgb(173, 20, 87), 22f) { pokazKomisje() }, lpPelny(12))
 
         val odstep = View(this)
@@ -2270,7 +2268,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         val grafit = Color.rgb(69, 90, 100)
 
         val w1 = wiersz()
-        w1.addView(przycisk("← Menu", szary) { pokazStart() })
+        w1.addView(przycisk("\u2190 Maszyny", szary) { pokazMaszynyMenu() })
         w1.addView(tekst("  Maszyny - pomiary", 22f, grafit, true), lp(1f))
         w1.addView(przycisk("Zakończ", czerwony) { zakoncz() })
         ekranMasz.addView(w1)
@@ -2302,6 +2300,38 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         przew.addView(listaMaszWidok)
         ekranMasz.addView(przew, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         wczytajListeMaszZPliku()
+    }
+
+    // ---- menu Maszyny: pomiary (dopasowanie maszyn) i kontrola maszyny
+    private lateinit var ekranMaszMenu: LinearLayout
+    private lateinit var tKomputerMaszMenu: TextView
+
+    private fun zbudujMaszynyMenu() {
+        val kolor = Color.rgb(69, 90, 100)
+        ekranMaszMenu = LinearLayout(this)
+        ekranMaszMenu.orientation = LinearLayout.VERTICAL
+        ekranMaszMenu.setPadding(dp(18), dp(18), dp(18), dp(18))
+        ekranMaszMenu.setBackgroundColor(Color.rgb(245, 248, 252))
+        val w1 = wiersz()
+        w1.addView(przycisk("\u2190 Menu", szary) { pokazStart() })
+        w1.addView(tekst("  Maszyny", 24f, kolor, true), lp(1f))
+        w1.addView(przycisk("Zakończ", czerwony) { zakoncz() })
+        ekranMaszMenu.addView(w1)
+        tKomputerMaszMenu = tekst("", 14f, szary)
+        tKomputerMaszMenu.setPadding(0, dp(10), 0, dp(4))
+        ekranMaszMenu.addView(tKomputerMaszMenu)
+        ekranMaszMenu.addView(przycisk("Pomiary - dopasowanie maszyn\n(kod maszyny do pomiaru)", kolor, 20f) { pokazMaszyny() }, lpWysoki(14))
+        ekranMaszMenu.addView(przycisk("Kontrola maszyny\n(wstępna, okresowa, specjalna)", Color.rgb(0, 121, 107), 20f) { pokazKontrole() }, lpWysoki(12))
+    }
+
+    private fun pokazMaszynyMenu() {
+        zatrzymajKamere()
+        tryb = "MASZYNY_MENU"
+        setContentView(ekranMaszMenu)
+        val pol = tloWidziane() || komputerWidziany()
+        tKomputerMaszMenu.text = if (pol) "\u2714 Program BHP otwarty - dane wymieniają się same" else "Program BHP zamknięty / brak połączenia - zmiany poczekają w telefonie"
+        tKomputerMaszMenu.setTextColor(if (pol) zielony else pomaranczowy)
+        pokazStan()
     }
 
     private fun pokazMaszyny() {
@@ -2898,7 +2928,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         widokKon = "lista"
         trescKon.removeAllViews()
         aktKon = null
-        naglowekKon("Kontrola maszyny", "← Menu") { pokazStart() }
+        naglowekKon("Kontrola maszyny", "\u2190 Maszyny") { pokazMaszynyMenu() }
         val oczek = odpowiedziKon().size
         val st = tekst(when {
             tloWidziane() || komputerWidziany() -> "✔ Program BHP otwarty - kontrole i odpowiedzi wymieniają się same"
