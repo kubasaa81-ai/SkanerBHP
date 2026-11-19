@@ -34,6 +34,9 @@ import java.util.concurrent.Executors
  *                            odpowiedź: OK | OTWARTO (bez zgody na SMS: otwarte Wiadomości z gotowym tekstem) | BLAD|opis
  *   POST /komisja         -> "KOM|id|tytuł" + "P|nr|etykieta|status" + "T|treść" - punkty do oceny (Komisja BHP)
  *   GET  /komisja_oceny   -> "KOO|id|ile" + linie "nr|W/N/T/P" - oceny zrobione w telefonie
+ *   POST /kontrole        -> "KON|wersja" + K|P|T|W|S|U - kontrole maszyn w toku z pytaniami
+ *   GET  /kontrole_odp    -> "KOD|ile" + "sekw|idK|czesc|poz|odp|uwagi|własna" - odpowiedzi czekające w telefonie
+ *   POST /kontrole_odebrane -> "sekw,sekw" - odpowiedzi zapisane w bazie (telefon je usuwa)
  */
 class Serwer(private val obsluga: Obsluga) {
 
@@ -62,6 +65,9 @@ class Serwer(private val obsluga: Obsluga) {
         fun zdjeciaSprawy(tekst: String)
         fun komisja(tekst: String)
         fun komisjaOceny(): String
+        fun kontrole(tekst: String)
+        fun kontroleOdp(): String
+        fun kontroleOdebrane(tekst: String)
     }
 
     @Volatile private var gniazdo: ServerSocket? = null
@@ -185,6 +191,9 @@ class Serwer(private val obsluga: Obsluga) {
                 sciezka == "/maszyny_odebrane" && metoda == "POST" -> { obsluga.maszynyOdebrane(cialo); "OK" }
                 sciezka == "/komisja" && metoda == "POST" -> { obsluga.komisja(cialo); "OK" }
                 sciezka == "/komisja_oceny" -> obsluga.komisjaOceny()
+                sciezka == "/kontrole" && metoda == "POST" -> { obsluga.kontrole(cialo); "OK" }
+                sciezka == "/kontrole_odp" -> obsluga.kontroleOdp()
+                sciezka == "/kontrole_odebrane" && metoda == "POST" -> { obsluga.kontroleOdebrane(cialo); "OK" }
                 sciezka == "/" -> "Skaner BHP - połączenie działa ✔"
                 else -> "?"
             }

@@ -27,6 +27,7 @@ import android.app.AlertDialog
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.Spinner
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -83,6 +84,8 @@ import kotlin.system.exitProcess
  * Maszyny - pomiary: komputer wysyła źródła z pomiarów (stary spis) i kartotekę maszyn; na hali przypisujesz
  *   źródłu maszynę z kartoteki (nr inw. z tabliczki albo wybór z listy, kilka maszyn = rozbicie, "nie maszyna");
  *   komputer pobiera przypisania (Pomiary -> Maszyny w pomiarach -> "Połączenia z telefonu").
+ * Kontrola maszyny: Program BHP wysyła kontrole w toku z pytaniami (lista kontrolna, zakres) - telefon pokazuje
+ *   jedno pytanie na ekranie (TAK / NIE / NIE DOTYCZY, przy złej odpowiedzi uwagi ze słownika), odpowiedzi idą do bazy same.
  * Komisja BHP: komputer wysyła punkty z poprzedniego protokołu, telefon pokazuje je po jednym
  *   (Wykonano / Nie wykonano / W trakcie / Pomiń), komputer pobiera oceny ("Z telefonu").
  * Zdjęcia (wypadki): zdjęcia zrobione zwykłym aparatem wybierasz z galerii (podgląd, opis każdego) -
@@ -290,6 +293,28 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private lateinit var wOcenyKom: LinearLayout
     private lateinit var wNawKom: LinearLayout
 
+    // kontrola maszyny - pytania z bazy po jednym na ekranie
+    private class PytanieKon(val idK: Int, val czesc: String, val poz: Int, val kod: String, val prawid: String,
+                             val naglowek: String, val tresc: String, val wskaz: String, val slownik: List<String>,
+                             val odpPc: String, val uwagiPc: String)
+    private class KontrolaKon(val id: Int, val maszyna: String, val opis: String, val pytania: MutableList<PytanieKon>)
+    private class BudowaPytKon(val idK: Int, val czesc: String, val poz: Int, val kod: String, val prawid: String,
+                               val odp: String, val nagl: String) {
+        val tresc = StringBuilder()
+        val wskaz = StringBuilder()
+        val slownik = mutableListOf<String>()
+        var uwagi = ""
+    }
+    private class OdpKon(val sekw: String, val klucz: String, val odp: String, val uwagi: String, val wlasna: String)
+    private var kontroleKon: List<KontrolaKon> = emptyList()
+    @Volatile private var wersjaKon = ""
+    private var aktKon: KontrolaKon? = null
+    private var biezKon = 0
+    private val kolorKon = Color.rgb(69, 90, 100)
+    private val folderKon: File by lazy { File(filesDir, "kontrole").apply { mkdirs() } }
+    private lateinit var ekranKon: LinearLayout
+    private lateinit var trescKon: LinearLayout
+
     // start
     private lateinit var tSiec: TextView
     private lateinit var tKomputerStart: TextView
@@ -390,6 +415,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         zbudujChemiaMenu()
         zbudujMaszyny()
         zbudujKomisje()
+        zbudujKontrole()
         pokazStart()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
             prosbaSms.launch(Manifest.permission.SEND_SMS)
@@ -493,7 +519,12 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         ekranStart.addView(przycisk("Odzież i ŚOI", Color.rgb(46, 125, 50), 24f) { pokazOdziez() }, lpPelny(18))
         ekranStart.addView(przycisk("Wypadki - zdjęcia", Color.rgb(198, 40, 40), 22f) { pokazZdjecia() }, lpPelny(12))
         ekranStart.addView(przycisk("Chemia", Color.rgb(106, 27, 154), 22f) { pokazChemiaMenu() }, lpPelny(12))
-        ekranStart.addView(przycisk("Maszyny - pomiary", Color.rgb(69, 90, 100), 22f) { pokazMaszyny() }, lpPelny(12))
+        val wMasz = wiersz()
+        wMasz.addView(przycisk("Maszyny - pomiary", Color.rgb(69, 90, 100), 18f) { pokazMaszyny() }, LinearLayout.LayoutParams(0, dp(64), 1f))
+        val pKon = LinearLayout.LayoutParams(0, dp(64), 1f)
+        pKon.leftMargin = dp(8)
+        wMasz.addView(przycisk("Kontrola maszyny", Color.rgb(0, 121, 107), 18f) { pokazKontrole() }, pKon)
+        ekranStart.addView(wMasz, lpPelny(12))
         ekranStart.addView(przycisk("Komisja BHP - zalecenia", Color.rgb(173, 20, 87), 22f) { pokazKomisje() }, lpPelny(12))
 
         val odstep = View(this)
@@ -2118,7 +2149,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         ostatnieTlo = SystemClock.elapsedRealtime()
         runOnUiThread { pokazStan() }
         return "STAN|$tryb|$wersjaListyChem|${zdjeciaChem().size}|$wersjaListyM|${powiazaniaMasz().size}|$wersjaSprawWyp|${plikiZdjec().size}" +
-            "|${idListyKom.ifBlank { "0" }}|${licznikOcenKom()}"
+            "|${idListyKom.ifBlank { "0" }}|${licznikOcenKom()}|${wersjaKon.ifBlank { "0" }}|${ileOdpKon()}"
     }
 
     private fun zrobZdjecieChem() {
@@ -2820,6 +2851,369 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     override fun komisjaOceny(): String {
         val oc = ocenyKom()
         return "KOO|$idListyKom|${oc.size}" + oc.entries.joinToString("") { "\n${it.key}|${it.value}" }
+    }
+
+    // ------------------------------------------------------------------
+    //  KONTROLA MASZYNY - pytania z bazy (lista kontrolna, zakres) po jednym na ekranie
+    //  Program BHP otwarty sam wysyła kontrole w toku (POST /kontrole), odpowiedzi czekają w telefonie
+    //  i same idą do bazy (GET /kontrole_odp, potem POST /kontrole_odebrane).
+    // ------------------------------------------------------------------
+    private fun zbudujKontrole() {
+        ekranKon = LinearLayout(this)
+        ekranKon.orientation = LinearLayout.VERTICAL
+        ekranKon.setPadding(dp(12), dp(12), dp(12), dp(12))
+        ekranKon.setBackgroundColor(Color.rgb(245, 248, 252))
+        trescKon = LinearLayout(this)
+        trescKon.orientation = LinearLayout.VERTICAL
+        ekranKon.addView(trescKon, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        val f = File(folderKon, "lista.txt")
+        if (f.exists()) try { przetworzListeKon(f.readText(Charsets.UTF_8)) } catch (e: Exception) {}
+    }
+
+    private fun naglowekKon(tytul: String, wstecz: String, akcja: () -> Unit) {
+        val w1 = wiersz()
+        w1.addView(przycisk(wstecz, szary) { akcja() })
+        w1.addView(tekst("  $tytul", 20f, kolorKon, true), lp(1f))
+        w1.addView(przycisk("Zakończ", czerwony) { zakoncz() })
+        trescKon.addView(w1)
+    }
+
+    private fun pokazKontrole() {
+        zatrzymajKamere()
+        tryb = "KONTROLA"
+        aktKon = null
+        setContentView(ekranKon)
+        pokazListeKon()
+        pokazStan()
+    }
+
+    private fun pokazListeKon() {
+        trescKon.removeAllViews()
+        aktKon = null
+        naglowekKon("Kontrola maszyny", "← Menu") { pokazStart() }
+        val oczek = odpowiedziKon().size
+        val st = tekst(when {
+            tloWidziane() || komputerWidziany() -> "✔ Program BHP otwarty - kontrole i odpowiedzi wymieniają się same"
+            else -> "Program BHP zamknięty / brak połączenia - odpowiedzi poczekają w telefonie"
+        } + if (oczek > 0) "\nCzeka na wysłanie: $oczek odp." else "", 14f,
+            if (tloWidziane() || komputerWidziany()) zielony else pomaranczowy)
+        st.setPadding(0, dp(8), 0, dp(8))
+        trescKon.addView(st)
+        val przew = ScrollView(this)
+        val lista = LinearLayout(this)
+        lista.orientation = LinearLayout.VERTICAL
+        if (kontroleKon.isEmpty()) {
+            lista.addView(tekst(if (wersjaKon.isBlank()) "Lista kontroli jeszcze nie przyszła - otwórz Program BHP na komputerze (GlobalProtect włączony)."
+                else "Nie ma kontroli w toku. Załóż kontrolę w Programie BHP (Maszyny -> Kontrola maszyny -> Nowa kontrola) - pojawi się tu sama.", 17f, szary))
+        }
+        for (k in kontroleKon) {
+            val ile = k.pytania.size
+            val odp = k.pytania.count { odpKon(it).first.isNotEmpty() }
+            val b = przycisk("${k.maszyna}\n${k.opis}\nodpowiedzi: $odp z $ile", if (odp >= ile && ile > 0) zielony else kolorKon, 17f) {
+                aktKon = k
+                biezKon = k.pytania.indexOfFirst { odpKon(it).first.isEmpty() }.let { if (it < 0) 0 else it }
+                pokazPytanieKon()
+            }
+            b.gravity = Gravity.START or Gravity.CENTER_VERTICAL
+            val p = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            p.topMargin = dp(10)
+            lista.addView(b, p)
+        }
+        przew.addView(lista)
+        trescKon.addView(przew, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+    }
+
+    // odpowiedź i uwagi pytania: czekająca w telefonie, a gdy brak - z bazy
+    private fun odpKon(p: PytanieKon): Pair<String, String> {
+        val o = odpowiedziKon()[kluczKon(p)]
+        return if (o != null) Pair(o.odp, o.uwagi) else Pair(p.odpPc, p.uwagiPc)
+    }
+
+    private fun kluczKon(p: PytanieKon) = "${p.idK}|${p.czesc}|${p.poz}"
+
+    private fun zlaKon(p: PytanieKon, odp: String) = odp.isNotEmpty() && odp != "nie dotyczy" && odp != p.prawid
+
+    private fun pokazPytanieKon(pokazUwagi: Boolean = false) {
+        val k = aktKon ?: return pokazListeKon()
+        if (k.pytania.isEmpty()) return pokazListeKon()
+        biezKon = biezKon.coerceIn(0, k.pytania.size - 1)
+        val p = k.pytania[biezKon]
+        val (odp, uwagi) = odpKon(p)
+        trescKon.removeAllViews()
+        naglowekKon(k.maszyna, "← Lista") { pokazListeKon() }
+        val ileOdp = k.pytania.count { odpKon(it).first.isNotEmpty() }
+        val licz = tekst("${p.kod}   |   pytanie ${biezKon + 1} z ${k.pytania.size}   |   odpowiedzi $ileOdp", 15f, kolorKon, true)
+        licz.setPadding(0, dp(6), 0, dp(2))
+        trescKon.addView(licz)
+        trescKon.addView(tekst(p.naglowek, 13f, szary))
+
+        val karta = LinearLayout(this)
+        karta.orientation = LinearLayout.VERTICAL
+        karta.setPadding(dp(16), dp(14), dp(16), dp(16))
+        val tlo = GradientDrawable()
+        tlo.cornerRadius = dp(16).toFloat()
+        tlo.setColor(Color.WHITE)
+        tlo.setStroke(dp(1), Color.rgb(220, 225, 232))
+        karta.background = tlo
+        val tPyt = tekst(p.tresc, 21f, Color.rgb(33, 33, 33), true)
+        tPyt.setLineSpacing(0f, 1.12f)
+        karta.addView(tPyt)
+        if (p.wskaz.isNotBlank()) {
+            val tw = tekst(p.wskaz, 15f, szary)
+            tw.setPadding(0, dp(10), 0, 0)
+            karta.addView(tw)
+        }
+        val tOdp = tekst(when (odp) {
+            "" -> "Bez odpowiedzi"
+            else -> "Odpowiedź: ${odp.uppercase()}" + (if (zlaKon(p, odp)) "  (nieprawidłowa)" else "") +
+                (if (uwagi.isNotBlank()) "\nUwagi: $uwagi" else "")
+        }, 17f, when {
+            odp.isEmpty() -> szary
+            zlaKon(p, odp) -> czerwony
+            odp == "nie dotyczy" -> szary
+            else -> zielony
+        }, true)
+        tOdp.setPadding(0, dp(14), 0, 0)
+        karta.addView(tOdp)
+
+        // uwagi - przy złej odpowiedzi: słownik + zapisane + własna
+        if (pokazUwagi && zlaKon(p, odp)) {
+            val tu = tekst("Uwagi do protokołu (zaznacz jedną lub kilka):", 16f, czerwony, true)
+            tu.setPadding(0, dp(16), 0, dp(4))
+            karta.addView(tu)
+            val zapisane = uwagi.split("; ").map { it.trim() }.filter { it.isNotEmpty() }
+            val wszystkie = (p.slownik + zapisane).distinct()
+            val pola = mutableListOf<CheckBox>()
+            for (u in wszystkie) {
+                val cb = CheckBox(this)
+                cb.text = u
+                cb.textSize = 17f
+                cb.isChecked = zapisane.contains(u)
+                cb.setPadding(dp(4), dp(8), 0, dp(8))
+                karta.addView(cb)
+                pola.add(cb)
+            }
+            val ed = EditText(this)
+            ed.hint = "Własna uwaga (dopisze się do słownika)"
+            ed.textSize = 17f
+            ed.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            karta.addView(ed)
+            val bz = przycisk("Zapisz uwagi i dalej →", niebieski, 18f) {
+                val wybrane = pola.filter { it.isChecked }.map { it.text.toString() }.toMutableList()
+                val wl = ed.text.toString().trim()
+                if (wl.isNotEmpty() && !wybrane.contains(wl)) wybrane.add(wl)
+                zapiszOdpKon(p, odp, wybrane.joinToString("; "), wl)
+                przejdzKon(1)
+            }
+            val pz = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58))
+            pz.topMargin = dp(10)
+            karta.addView(bz, pz)
+        }
+        val przew = ScrollView(this)
+        przew.addView(karta)
+        val pk = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+        pk.topMargin = dp(6)
+        trescKon.addView(przew, pk)
+
+        // odpowiedzi
+        val w2 = wiersz()
+        w2.addView(przyciskOdpKon("TAK", zielony, odp == "tak") { odpowiedzKon("tak") }, lpKom(1f))
+        w2.addView(przyciskOdpKon("NIE", czerwony, odp == "nie") { odpowiedzKon("nie") }, lpKom(1f, 8))
+        w2.addView(przyciskOdpKon("NIE\nDOTYCZY", szary, odp == "nie dotyczy") { odpowiedzKon("nie dotyczy") }, lpKom(1f, 8))
+        val p2 = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        p2.topMargin = dp(10)
+        trescKon.addView(w2, p2)
+        val w3 = wiersz()
+        w3.addView(przycisk("← Poprzednie", niebieski, 15f) { przejdzKon(-1) }, lpKom(1f))
+        w3.addView(przycisk("Bez odpowiedzi →", pomaranczowy, 15f) { nastepneBezKon() }, lpKom(1f, 8))
+        w3.addView(przycisk("Następne →", niebieski, 15f) { przejdzKon(1) }, lpKom(1f, 8))
+        val p3 = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        p3.topMargin = dp(8)
+        trescKon.addView(w3, p3)
+        przew.post { przew.scrollTo(0, 0) }
+    }
+
+    // przycisk odpowiedzi - wybrana pełnym kolorem z ptaszkiem, pozostałe przygaszone
+    private fun przyciskOdpKon(t: String, kolor: Int, wybrany: Boolean, akcja: () -> Unit): Button {
+        val b = przycisk(if (wybrany) "✔ $t" else t, kolor, 19f) { akcja() }
+        b.alpha = if (wybrany) 1f else 0.75f
+        return b
+    }
+
+    private fun odpowiedzKon(odp: String) {
+        val k = aktKon ?: return
+        val p = k.pytania.getOrNull(biezKon) ?: return
+        val stareUwagi = odpKon(p).second
+        ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 100)
+        if (zlaKon(p, odp)) {
+            // zła odpowiedź - zostań na pytaniu i pokaż uwagi
+            zapiszOdpKon(p, odp, stareUwagi, "")
+            pokazPytanieKon(true)
+        } else {
+            zapiszOdpKon(p, odp, "", "")
+            przejdzKon(1)
+        }
+    }
+
+    private fun przejdzKon(o: Int) {
+        val k = aktKon ?: return
+        val n = biezKon + o
+        if (n >= k.pytania.size) {
+            Toast.makeText(this, "To było ostatnie pytanie - odpowiedzi: ${k.pytania.count { odpKon(it).first.isNotEmpty() }} z ${k.pytania.size}", Toast.LENGTH_LONG).show()
+            pokazListeKon()
+            return
+        }
+        biezKon = n.coerceAtLeast(0)
+        pokazPytanieKon()
+    }
+
+    private fun nastepneBezKon() {
+        val k = aktKon ?: return
+        val n = k.pytania.size
+        for (i in 1..n) {
+            val j = (biezKon + i) % n
+            if (odpKon(k.pytania[j]).first.isEmpty()) {
+                biezKon = j
+                pokazPytanieKon()
+                return
+            }
+        }
+        Toast.makeText(this, "Wszystkie pytania mają odpowiedź", Toast.LENGTH_LONG).show()
+    }
+
+    // ---- odpowiedzi czekające w telefonie: plik odpowiedzi.txt  "sekw|idK|czesc|poz|odp|uwagi|własna" (UTF-8)
+    private fun odpowiedziKon(): LinkedHashMap<String, OdpKon> {
+        val wyn = linkedMapOf<String, OdpKon>()
+        val f = File(folderKon, "odpowiedzi.txt")
+        if (f.exists()) for (l in f.readLines(Charsets.UTF_8)) {
+            val p = l.split("|")
+            if (p.size < 7) continue
+            val o = OdpKon(p[0], "${p[1]}|${p[2]}|${p[3]}", p[4], p[5], p[6])
+            wyn[o.klucz] = o
+        }
+        return wyn
+    }
+
+    private fun zapiszWszystkieOdpKon(m: Map<String, OdpKon>) {
+        try {
+            File(folderKon, "odpowiedzi.txt").writeText(m.values.joinToString("\n") {
+                "${it.sekw}|${it.klucz}|${it.odp}|${it.uwagi}|${it.wlasna}"
+            }, Charsets.UTF_8)
+        } catch (e: Exception) {
+        }
+    }
+
+    @Synchronized
+    private fun zapiszOdpKon(p: PytanieKon, odp: String, uwagi: String, wlasna: String) {
+        val m = odpowiedziKon()
+        val czyste = { s: String -> s.replace("|", "/").replace("\n", " ") }
+        m[kluczKon(p)] = OdpKon(System.currentTimeMillis().toString() + (m.size % 100).toString().padStart(2, '0'),
+            kluczKon(p), odp, czyste(uwagi), czyste(wlasna))
+        zapiszWszystkieOdpKon(m)
+    }
+
+    // ---- lista z komputera
+    private fun przetworzListeKon(tekst: String) {
+        val linie = tekst.replace("\r", "").split("\n")
+        if (linie.isEmpty() || !linie[0].startsWith("KON|")) return
+        val lista = mutableListOf<KontrolaKon>()
+        var k: KontrolaKon? = null
+        var b: BudowaPytKon? = null
+        fun zamknij() {
+            val bb = b ?: return
+            k?.pytania?.add(PytanieKon(bb.idK, bb.czesc, bb.poz, bb.kod, bb.prawid, bb.nagl, bb.tresc.toString().trim(),
+                bb.wskaz.toString().trim(), bb.slownik.toList(), bb.odp, bb.uwagi))
+            b = null
+        }
+        for (l in linie.drop(1)) {
+            val p = l.split("|")
+            when (p[0]) {
+                "K" -> {
+                    zamknij()
+                    k = KontrolaKon(p.getOrElse(1) { "0" }.toIntOrNull() ?: 0, polskie(p.getOrElse(2) { "" }), polskie(p.getOrElse(3) { "" }), mutableListOf())
+                    lista.add(k!!)
+                }
+                "P" -> {
+                    zamknij()
+                    b = BudowaPytKon(p.getOrElse(1) { "0" }.toIntOrNull() ?: 0, p.getOrElse(2) { "" }, p.getOrElse(3) { "0" }.toIntOrNull() ?: 0,
+                        p.getOrElse(4) { "" }, p.getOrElse(5) { "tak" }, polskie(p.getOrElse(6) { "" }), polskie(p.getOrElse(7) { "" }))
+                }
+                "T" -> b?.let { if (it.tresc.isNotEmpty()) it.tresc.append("\n"); it.tresc.append(polskie(l.substring(2))) }
+                "W" -> b?.let { if (it.wskaz.isNotEmpty()) it.wskaz.append("\n"); it.wskaz.append(polskie(l.substring(2))) }
+                "S" -> b?.slownik?.add(polskie(l.substring(2)))
+                "U" -> b?.let { it.uwagi = polskie(l.substring(2)) }
+            }
+        }
+        zamknij()
+        wersjaKon = linie[0].substring(4).trim()
+        kontroleKon = lista
+    }
+
+    // serwer: POST /kontrole  (wysyła Program BHP w tle, gdy lista w telefonie jest inna)
+    override fun kontrole(tekst: String) {
+        try { File(folderKon, "lista.txt").writeText(tekst, Charsets.UTF_8) } catch (e: Exception) {}
+        przetworzListeKon(tekst)
+        runOnUiThread {
+            if (tryb == "KONTROLA") {
+                val a = aktKon
+                if (a == null) {
+                    pokazListeKon()
+                } else {
+                    val nowa = kontroleKon.firstOrNull { it.id == a.id }
+                    if (nowa == null) {
+                        pokazListeKon()
+                    } else {
+                        // to samo pytanie co przed odświeżeniem (lista mogła się zmienić)
+                        val klucz = a.pytania.getOrNull(biezKon)?.let { kluczKon(it) }
+                        aktKon = nowa
+                        val i = nowa.pytania.indexOfFirst { kluczKon(it) == klucz }
+                        if (i >= 0) biezKon = i
+                        // nie przerywaj wpisywania uwag - odśwież tylko widok bez panelu uwag
+                        if (trescKon.findFocus() !is EditText) pokazPytanieKon()
+                    }
+                }
+            }
+        }
+    }
+
+    // serwer: GET /kontrole_odp  -> "KOD|ile" + linie "sekw|idK|czesc|poz|odp|uwagi|własna" (polskie litery jako ~a)
+    override fun kontroleOdp(): String {
+        val m = odpowiedziKon()
+        return "KOD|${m.size}" + m.values.joinToString("") {
+            "\n${it.sekw}|${it.klucz}|${it.odp}|${doKomputera(it.uwagi)}|${doKomputera(it.wlasna)}"
+        }
+    }
+
+    // serwer: POST /kontrole_odebrane  "sekw,sekw,..." - zapisane w bazie, usuń z telefonu
+    @Synchronized
+    override fun kontroleOdebrane(tekst: String) {
+        val zap = tekst.split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        if (zap.isEmpty()) return
+        val m = odpowiedziKon()
+        val zostaja = m.filterValues { !zap.contains(it.sekw) }
+        zapiszWszystkieOdpKon(zostaja)
+    }
+
+    private fun ileOdpKon(): Int = try { odpowiedziKon().size } catch (e: Exception) { 0 }
+
+    // polskie litery -> ~a ~c ... (jak lista z komputera, tylko w drugą stronę)
+    private fun doKomputera(s: String): String {
+        val z = "acelnosxzACELNOSXZ"
+        val na = "ąćęłńóśźżĄĆĘŁŃÓŚŹŻ"
+        val b = StringBuilder()
+        for (c in s) {
+            val k = na.indexOf(c)
+            when {
+                k >= 0 -> b.append('~').append(z[k])
+                c == '|' -> b.append('/')
+                c == '\n' || c == '\r' -> b.append(' ')
+                c.code in 32..126 -> b.append(c)
+                c == '–' || c == '—' -> b.append('-')
+                c == '„' || c == '”' || c == '“' -> b.append('"')
+                else -> b.append(' ')
+            }
+        }
+        return b.toString()
     }
 
     // ------------------------------------------------------------------
