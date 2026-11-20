@@ -10,7 +10,7 @@ import java.util.concurrent.Executors
 /**
  * Mały serwer HTTP w telefonie (port 8080). Program BHP na komputerze łączy się z nim przez GlobalProtect:
  *   GET  /ping            -> "SKANER_BHP|<tryb>"
- *   GET  /stan            -> "STAN|tryb|wersja spisu chemii|zdjęć chemii|wersja maszyn|połączeń maszyn|wersja spraw|zdjęć wypadków"
+ *   GET  /stan            -> "STAN|tryb|wersja spisu chemii|zdjęć chemii|wersja maszyn|połączeń maszyn|wersja spraw|zdjęć wypadków|lista komisji|oceny|kontrole|odpowiedzi|lista zapomóg|decyzje zapomóg"
  *                            (Program BHP otwarty odpytuje w tle i sam wysyła listy / zabiera zdjęcia)
  *   POST /chemia_wyniki   -> linie tekstu: co komputer zrobił ze zdjęciami etykiet
  *   POST /zdjecia_sprawy  -> "WSL|wersja" + linie "id|opis" - otwarte sprawy wypadkowe (bez nazwisk)
@@ -35,6 +35,9 @@ import java.util.concurrent.Executors
  *   POST /komisja         -> "KOM|id|tytuł" + "P|nr|etykieta|status" + "T|treść" - punkty do oceny (Komisja BHP)
  *   GET  /komisja_oceny   -> "KOO|id|ile" + linie "nr|W/N/T/P" - oceny zrobione w telefonie
  *   POST /kontrole        -> "KON|wersja" + K|P|T|W|S|U - kontrole maszyn w toku z pytaniami
+ *   POST /zapomogi        -> "ZAP|wersja|tytuł" + "Z|id|nr|stan|sprawa|data|rodzaj|osoba|dni" + "S|skutki" + "T|opis" - protokoły zapomóg
+ *   GET  /zapomogi_decyzje -> "ZAD|wersja|ile" + linie "id|R/P" - decyzje komisji z telefonu (R rozpatrzona, P przeniesiona)
+ *   POST /zapomogi_odebrane -> "id,id" - decyzje zapisane w bazie (telefon je usuwa)
  *   GET  /kontrole_odp    -> "KOD|ile" + "sekw|idK|czesc|poz|odp|uwagi|własna" - odpowiedzi czekające w telefonie
  *   POST /kontrole_odebrane -> "sekw,sekw" - odpowiedzi zapisane w bazie (telefon je usuwa)
  */
@@ -68,6 +71,9 @@ class Serwer(private val obsluga: Obsluga) {
         fun kontrole(tekst: String)
         fun kontroleOdp(): String
         fun kontroleOdebrane(tekst: String)
+        fun zapomogi(tekst: String)
+        fun zapomogiDecyzje(): String
+        fun zapomogiOdebrane(tekst: String)
     }
 
     @Volatile private var gniazdo: ServerSocket? = null
@@ -194,6 +200,9 @@ class Serwer(private val obsluga: Obsluga) {
                 sciezka == "/kontrole" && metoda == "POST" -> { obsluga.kontrole(cialo); "OK" }
                 sciezka == "/kontrole_odp" -> obsluga.kontroleOdp()
                 sciezka == "/kontrole_odebrane" && metoda == "POST" -> { obsluga.kontroleOdebrane(cialo); "OK" }
+                sciezka == "/zapomogi" && metoda == "POST" -> { obsluga.zapomogi(cialo); "OK" }
+                sciezka == "/zapomogi_decyzje" -> obsluga.zapomogiDecyzje()
+                sciezka == "/zapomogi_odebrane" && metoda == "POST" -> { obsluga.zapomogiOdebrane(cialo); "OK" }
                 sciezka == "/" -> "Skaner BHP - połączenie działa ✔"
                 else -> "?"
             }

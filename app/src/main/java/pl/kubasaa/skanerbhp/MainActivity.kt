@@ -89,6 +89,8 @@ import kotlin.system.exitProcess
  *   Z telefonu też: nowa kontrola (maszyna z kartoteki, przyczyna, data) i poprawa danych maszyny (nr wewn., rok budowy...).
  * Komisja BHP: komputer wysyła punkty z poprzedniego protokołu, telefon pokazuje je po jednym
  *   (Wykonano / Nie wykonano / W trakcie / Pomiń), komputer pobiera oceny ("Z telefonu").
+ * Wypadki -> Zapomogi: na posiedzeniu komisji telefon pokazuje protokoły zapomóg czekające na komisję (nr protokołu,
+ *   co się wydarzyło, skutki) - Poprzedni / Następny, decyzja Rozpatrzono / Przeniesiono idzie sama do Programu BHP.
  * Zdjęcia (wypadki): zdjęcia zrobione zwykłym aparatem wybierasz z galerii (podgląd, opis każdego) -
  *   kopie (pomniejszone) czekają w aplikacji, komputer pobiera je do protokołu oględzin
  *   (Oględziny -> "Z telefonu") i wtedy aplikacja kasuje swoje kopie.
@@ -294,6 +296,32 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private lateinit var wOcenyKom: LinearLayout
     private lateinit var wNawKom: LinearLayout
 
+    // wypadki - podmenu i zapomogi (podgląd protokołów na posiedzeniu komisji)
+    private class ProtZap(val id: Int, val nr: String, val stan: String, val sprawa: String, val data: String,
+                          val rodzaj: String, val osoba: String, val dni: String) {
+        val skutki = StringBuilder()
+        val opis = StringBuilder()
+    }
+    private var protZap: List<ProtZap> = emptyList()
+    @Volatile private var idListyZap = "0"
+    private var tytulZap = ""
+    private var biezacyZap = 0
+    private val folderZap: File by lazy { File(filesDir, "zapomogi").apply { mkdirs() } }
+    private lateinit var ekranWypMenu: LinearLayout
+    private lateinit var ekranZap: LinearLayout
+    private lateinit var tTytulZap: TextView
+    private lateinit var tLicznikZap: TextView
+    private lateinit var tNrZap: TextView
+    private lateinit var tSprawaZap: TextView
+    private lateinit var tOsobaZap: TextView
+    private lateinit var tOpisZap: TextView
+    private lateinit var tSkutkiZap: TextView
+    private lateinit var tDniZap: TextView
+    private lateinit var tStatusZap: TextView
+    private lateinit var przewZap: ScrollView
+    private lateinit var wDecZap: LinearLayout
+    private lateinit var wNawZap: LinearLayout
+
     // kontrola maszyny - pytania z bazy po jednym na ekranie
     private class PytanieKon(val idK: Int, val czesc: String, val poz: Int, val kod: String, val prawid: String,
                              val naglowek: String, val tresc: String, val wskaz: String, val slownik: List<String>,
@@ -424,6 +452,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         zbudujKomisje()
         zbudujKontrole()
         zbudujMaszynyMenu()
+        zbudujWypadkiMenu()
+        zbudujZapomogi()
         pokazStart()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
             prosbaSms.launch(Manifest.permission.SEND_SMS)
@@ -437,6 +467,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                 "CHEMIA" -> pokazChemiaMenu()
                 "MASZYNY" -> pokazMaszynyMenu()
                 "KONTROLA" -> if (widokKon == "lista") pokazMaszynyMenu() else pokazListeKon()
+                "ZDJECIA", "ZAPOMOGI" -> pokazWypadkiMenu()
                 else -> pokazStart()
             }
         }
@@ -527,7 +558,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         ekranStart.addView(bVpn, lpPelny(4))
 
         ekranStart.addView(przycisk("Odzież i ŚOI", Color.rgb(46, 125, 50), 24f) { pokazOdziez() }, lpPelny(18))
-        ekranStart.addView(przycisk("Wypadki - zdjęcia", Color.rgb(198, 40, 40), 22f) { pokazZdjecia() }, lpPelny(12))
+        ekranStart.addView(przycisk("Wypadki", Color.rgb(198, 40, 40), 22f) { pokazWypadkiMenu() }, lpPelny(12))
         ekranStart.addView(przycisk("Chemia", Color.rgb(106, 27, 154), 22f) { pokazChemiaMenu() }, lpPelny(12))
         ekranStart.addView(przycisk("Maszyny", Color.rgb(69, 90, 100), 22f) { pokazMaszynyMenu() }, lpPelny(12))
         ekranStart.addView(przycisk("Komisja BHP - zalecenia", Color.rgb(173, 20, 87), 22f) { pokazKomisje() }, lpPelny(12))
@@ -848,7 +879,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         ekranZdj.setBackgroundColor(Color.rgb(245, 248, 252))
 
         val w1 = wiersz()
-        w1.addView(przycisk("← Menu", szary) { pokazStart() })
+        w1.addView(przycisk("← Wypadki", szary) { pokazWypadkiMenu() })
         w1.addView(tekst("  Zdjęcia - wypadki", 22f, czerwony, true), lp(1f))
         w1.addView(przycisk("Zakończ", czerwony) { zakoncz() })
         ekranZdj.addView(w1)
@@ -2154,7 +2185,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         ostatnieTlo = SystemClock.elapsedRealtime()
         runOnUiThread { pokazStan() }
         return "STAN|$tryb|$wersjaListyChem|${zdjeciaChem().size}|$wersjaListyM|${powiazaniaMasz().size}|$wersjaSprawWyp|${plikiZdjec().size}" +
-            "|${idListyKom.ifBlank { "0" }}|${licznikOcenKom()}|${wersjaKon.ifBlank { "0" }}|${ileOdpKon()}"
+            "|${idListyKom.ifBlank { "0" }}|${licznikOcenKom()}|${wersjaKon.ifBlank { "0" }}|${ileOdpKon()}" +
+            "|${idListyZap.ifBlank { "0" }}|${licznikDecZap()}"
     }
 
     private fun zrobZdjecieChem() {
@@ -2888,6 +2920,296 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     override fun komisjaOceny(): String {
         val oc = ocenyKom()
         return "KOO|$idListyKom|${oc.size}" + oc.entries.joinToString("") { "\n${it.key}|${it.value}" }
+    }
+
+    // ------------------------------------------------------------------
+    //  WYPADKI - podmenu: Zdjęcia / Zapomogi (posiedzenie komisji)
+    // ------------------------------------------------------------------
+    private fun zbudujWypadkiMenu() {
+        ekranWypMenu = LinearLayout(this)
+        ekranWypMenu.orientation = LinearLayout.VERTICAL
+        ekranWypMenu.setPadding(dp(18), dp(18), dp(18), dp(18))
+        ekranWypMenu.setBackgroundColor(Color.rgb(245, 248, 252))
+        val w1 = wiersz()
+        w1.addView(przycisk("← Menu", szary) { pokazStart() })
+        w1.addView(tekst("  Wypadki", 24f, czerwony, true), lp(1f))
+        w1.addView(przycisk("Zakończ", czerwony) { zakoncz() })
+        ekranWypMenu.addView(w1)
+        ekranWypMenu.addView(przycisk("Zdjęcia z wypadku", czerwony, 22f) { pokazZdjecia() }, lpPelny(18))
+        ekranWypMenu.addView(przycisk("Zapomogi - posiedzenie komisji", Color.rgb(106, 27, 154), 20f) { pokazZapomogi() }, lpPelny(12))
+    }
+
+    private fun pokazWypadkiMenu() {
+        zatrzymajKamere()
+        tryb = "WYPMENU"
+        setContentView(ekranWypMenu)
+        pokazStan()
+    }
+
+    // ------------------------------------------------------------------
+    //  ZAPOMOGI - podgląd protokołów na posiedzeniu komisji (do zreferowania):
+    //  nr protokołu, co się wydarzyło, skutki; Poprzedni / Następny; decyzja Rozpatrzono / Przeniesiono.
+    //  Program BHP otwarty sam wysyła protokoły "oczekuje" (i rozstrzygnięte w ostatniej dobie) - POST /zapomogi,
+    //  decyzje czekają w telefonie i same idą do bazy (GET /zapomogi_decyzje, potem POST /zapomogi_odebrane).
+    //  RODO: dane (nazwisko, skutki = dane o zdrowiu) są w telefonie tylko, dopóki protokoły czekają na komisję -
+    //  pusta lista z komputera kasuje plik.
+    // ------------------------------------------------------------------
+    private fun zbudujZapomogi() {
+        val kolor = Color.rgb(106, 27, 154)
+        ekranZap = LinearLayout(this)
+        ekranZap.orientation = LinearLayout.VERTICAL
+        ekranZap.setPadding(dp(12), dp(12), dp(12), dp(12))
+        ekranZap.setBackgroundColor(Color.rgb(245, 248, 252))
+
+        val w1 = wiersz()
+        w1.addView(przycisk("← Wypadki", szary) { pokazWypadkiMenu() })
+        w1.addView(tekst("  Zapomogi", 20f, kolor, true), lp(1f))
+        w1.addView(przycisk("Zakończ", czerwony) { zakoncz() })
+        ekranZap.addView(w1)
+
+        tTytulZap = tekst("", 14f, szary)
+        tTytulZap.setPadding(0, dp(6), 0, 0)
+        ekranZap.addView(tTytulZap)
+        tLicznikZap = tekst("", 18f, kolor, true)
+        tLicznikZap.gravity = Gravity.CENTER
+        tLicznikZap.setPadding(0, dp(6), 0, dp(6))
+        ekranZap.addView(tLicznikZap)
+
+        val karta = LinearLayout(this)
+        karta.orientation = LinearLayout.VERTICAL
+        karta.setPadding(dp(16), dp(14), dp(16), dp(16))
+        val tlo = GradientDrawable()
+        tlo.cornerRadius = dp(16).toFloat()
+        tlo.setColor(Color.WHITE)
+        tlo.setStroke(dp(1), Color.rgb(220, 225, 232))
+        karta.background = tlo
+        tNrZap = tekst("", 24f, kolor, true)
+        karta.addView(tNrZap)
+        tSprawaZap = tekst("", 16f, Color.rgb(55, 71, 79), true)
+        tSprawaZap.setPadding(0, dp(4), 0, 0)
+        karta.addView(tSprawaZap)
+        tOsobaZap = tekst("", 18f, Color.rgb(33, 33, 33), true)
+        tOsobaZap.setPadding(0, dp(4), 0, 0)
+        karta.addView(tOsobaZap)
+        val n1 = tekst("Co się wydarzyło:", 15f, kolor, true)
+        n1.setPadding(0, dp(14), 0, 0)
+        karta.addView(n1)
+        tOpisZap = tekst("", 18f, Color.rgb(33, 33, 33))
+        tOpisZap.setLineSpacing(0f, 1.15f)
+        tOpisZap.setPadding(0, dp(4), 0, 0)
+        karta.addView(tOpisZap)
+        val n2 = tekst("Skutki wypadku:", 15f, kolor, true)
+        n2.setPadding(0, dp(14), 0, 0)
+        karta.addView(n2)
+        tSkutkiZap = tekst("", 18f, Color.rgb(33, 33, 33))
+        tSkutkiZap.setLineSpacing(0f, 1.15f)
+        tSkutkiZap.setPadding(0, dp(4), 0, 0)
+        karta.addView(tSkutkiZap)
+        tDniZap = tekst("", 15f, szary)
+        tDniZap.setPadding(0, dp(10), 0, 0)
+        karta.addView(tDniZap)
+        tStatusZap = tekst("", 17f, szary, true)
+        tStatusZap.setPadding(0, dp(14), 0, 0)
+        karta.addView(tStatusZap)
+        przewZap = ScrollView(this)
+        przewZap.addView(karta)
+        ekranZap.addView(przewZap, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        wDecZap = wiersz()
+        wDecZap.addView(przycisk("Rozpatrzono", zielony, 18f) { decyzjaZap("R") }, lpKom(1f))
+        wDecZap.addView(przycisk("Przeniesiono na następne posiedzenie", pomaranczowy, 15f) { decyzjaZap("P") }, lpKom(1.3f, 8))
+        val p2 = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        p2.topMargin = dp(10)
+        ekranZap.addView(wDecZap, p2)
+
+        wNawZap = wiersz()
+        wNawZap.addView(przycisk("← Poprzedni", niebieski, 16f) { przejdzZap(-1) }, lpKom(1f))
+        wNawZap.addView(przycisk("Następny →", niebieski, 16f) { przejdzZap(1) }, lpKom(1f, 8))
+        val p4 = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        p4.topMargin = dp(8)
+        ekranZap.addView(wNawZap, p4)
+
+        val f = File(folderZap, "lista.txt")
+        if (f.exists()) try { przetworzListeZap(f.readText(Charsets.UTF_8)) } catch (e: Exception) {}
+        biezacyZap = 0
+    }
+
+    private fun pokazZapomogi() {
+        zatrzymajKamere()
+        tryb = "ZAPOMOGI"
+        setContentView(ekranZap)
+        pokazProtZap()
+        pokazStan()
+    }
+
+    // "ZAP|wersja|tytuł" + "Z|id|nr|stan O/R/P|sprawa|data wypadku|rodzaj|osoba|dni" + "S|skutki" + "T|opis"
+    private fun przetworzListeZap(tekst: String) {
+        val linie = tekst.replace("\r", "").split("\n")
+        if (linie.isEmpty() || !linie[0].startsWith("ZAP|")) return
+        val nag = linie[0].split("|")
+        val lst = mutableListOf<ProtZap>()
+        var akt: ProtZap? = null
+        for (l in linie.drop(1)) {
+            when {
+                l.startsWith("Z|") -> {
+                    akt?.let { lst.add(it) }
+                    val p = l.split("|")
+                    akt = ProtZap(p.getOrNull(1)?.trim()?.toIntOrNull() ?: 0, polskie(p.getOrElse(2) { "" }), p.getOrElse(3) { "O" }.trim(),
+                        polskie(p.getOrElse(4) { "" }), p.getOrElse(5) { "" }, polskie(p.getOrElse(6) { "" }),
+                        polskie(p.getOrElse(7) { "" }), p.getOrElse(8) { "" }.trim())
+                }
+                l.startsWith("S|") -> akt?.let { if (it.skutki.isNotEmpty()) it.skutki.append("\n"); it.skutki.append(polskie(l.substring(2))) }
+                l.startsWith("T|") -> akt?.let { if (it.opis.isNotEmpty()) it.opis.append("\n"); it.opis.append(polskie(l.substring(2))) }
+            }
+        }
+        akt?.let { lst.add(it) }
+        idListyZap = nag.getOrElse(1) { "0" }.trim()
+        tytulZap = polskie(nag.getOrElse(2) { "" }.trim())
+        protZap = lst.filter { it.id > 0 }
+    }
+
+    private fun decyzjeZap(): MutableMap<Int, String> {
+        val wyn = linkedMapOf<Int, String>()
+        val f = File(folderZap, "decyzje.txt")
+        if (f.exists()) for (l in f.readLines(Charsets.UTF_8)) {
+            val p = l.split("|")
+            val id = p.getOrNull(0)?.trim()?.toIntOrNull() ?: continue
+            wyn[id] = p.getOrElse(1) { "" }.trim()
+        }
+        return wyn
+    }
+
+    private fun zapiszDecyzjeZap(m: Map<Int, String>) {
+        try {
+            val f = File(folderZap, "decyzje.txt")
+            if (m.isEmpty()) f.delete() else f.writeText(m.entries.joinToString("\n") { "${it.key}|${it.value}" }, Charsets.UTF_8)
+        } catch (e: Exception) {
+        }
+    }
+
+    private fun opisDecyzjiZap(k: String): String = when (k) {
+        "R" -> "rozpatrzona"
+        "P" -> "przeniesiona na następne posiedzenie"
+        else -> "czeka na decyzję komisji"
+    }
+
+    private fun pokazProtZap() {
+        if (!::ekranZap.isInitialized) return
+        val dec = decyzjeZap()
+        if (protZap.isEmpty()) {
+            tTytulZap.text = ""
+            tLicznikZap.text = "Brak protokołów"
+            tNrZap.text = ""
+            tSprawaZap.text = ""
+            tOsobaZap.text = ""
+            tOpisZap.text = if (tloWidziane() || komputerWidziany()) "Nie ma protokołów zapomóg czekających na komisję."
+                else "Lista jeszcze nie przyszła - otwórz Program BHP na komputerze (GlobalProtect włączony), protokoły czekające na komisję przyjdą same."
+            tSkutkiZap.text = ""
+            tDniZap.text = ""
+            tStatusZap.text = ""
+            wDecZap.visibility = View.GONE
+            wNawZap.visibility = View.GONE
+            return
+        }
+        tTytulZap.text = tytulZap
+        wNawZap.visibility = View.VISIBLE
+        biezacyZap = biezacyZap.coerceIn(0, protZap.size - 1)
+        val p = protZap[biezacyZap]
+        tLicznikZap.text = "Protokół ${biezacyZap + 1} z ${protZap.size}"
+        tNrZap.text = "Protokół nr ${p.nr}"
+        tSprawaZap.text = "${p.rodzaj}  ${p.sprawa}" + if (p.data.isNotBlank()) ",  wypadek ${p.data}" else ""
+        tOsobaZap.text = p.osoba
+        tOpisZap.text = if (p.opis.isNotBlank()) p.opis.toString() else "(brak opisu w sprawie)"
+        tSkutkiZap.text = if (p.skutki.isNotBlank()) p.skutki.toString() else "(nie wpisano skutków)"
+        tDniZap.text = if (p.dni.isNotBlank() && p.dni != "0") "Niezdolność do pracy wg Programu BHP: ${p.dni} dni (kadry uzupełniają na protokole)" else ""
+        val d = dec[p.id]
+        when {
+            p.stan == "R" || p.stan == "P" -> {
+                tStatusZap.text = "✔ W Programie BHP: ${opisDecyzjiZap(p.stan)}"
+                tStatusZap.setTextColor(if (p.stan == "R") zielony else pomaranczowy)
+                wDecZap.visibility = View.GONE
+            }
+            d != null -> {
+                tStatusZap.text = "Twoja decyzja: ${opisDecyzjiZap(d)}" + if (tloWidziane() || komputerWidziany()) " - idzie do komputera" else " - czeka w telefonie, pójdzie po otwarciu Programu BHP"
+                tStatusZap.setTextColor(if (d == "R") zielony else pomaranczowy)
+                wDecZap.visibility = View.VISIBLE
+            }
+            else -> {
+                tStatusZap.text = "Czeka na decyzję komisji"
+                tStatusZap.setTextColor(szary)
+                wDecZap.visibility = View.VISIBLE
+            }
+        }
+        przewZap.scrollTo(0, 0)
+    }
+
+    private fun decyzjaZap(k: String) {
+        if (biezacyZap !in protZap.indices) return
+        val p = protZap[biezacyZap]
+        val zapisz = {
+            val dec = decyzjeZap()
+            dec[p.id] = k
+            zapiszDecyzjeZap(dec)
+            ton?.startTone(ToneGenerator.TONE_PROP_BEEP, 120)
+            if (biezacyZap < protZap.size - 1) biezacyZap++
+            pokazProtZap()
+        }
+        if (k == "P") {
+            okno("Przenieść protokół nr ${p.nr}?", "Sprawa wróci do kandydatów na następne posiedzenie (także w nowym roku), " +
+                    "plik tego protokołu zostanie skasowany w komputerze.", null,
+                listOf(Triple("Przeniesiono", pomaranczowy) { zapisz() }, Triple("Anuluj", szary) {}), {})
+        } else {
+            zapisz()
+        }
+    }
+
+    private fun przejdzZap(o: Int) {
+        if (protZap.isEmpty()) return
+        biezacyZap = (biezacyZap + o).coerceIn(0, protZap.size - 1)
+        pokazProtZap()
+    }
+
+    private fun licznikDecZap(): Long {
+        val f = File(folderZap, "decyzje.txt")
+        return if (f.exists() && f.length() > 0) f.lastModified() / 1000 else 0
+    }
+
+    // serwer: POST /zapomogi - lista protokołów (pusta lista = kasowanie danych w telefonie)
+    override fun zapomogi(tekst: String) {
+        val bylId = protZap.getOrNull(biezacyZap)?.id ?: 0
+        try {
+            val f = File(folderZap, "lista.txt")
+            if (tekst.replace("\r", "").split("\n").drop(1).any { it.startsWith("Z|") }) f.writeText(tekst, Charsets.UTF_8) else f.delete()
+        } catch (e: Exception) {
+        }
+        przetworzListeZap(tekst)
+        runOnUiThread {
+            val i = protZap.indexOfFirst { it.id == bylId }
+            biezacyZap = if (i >= 0) i else 0
+            if (tryb == "ZAPOMOGI") pokazProtZap()
+        }
+    }
+
+    // serwer: GET /zapomogi_decyzje -> "ZAD|wersja|ile" + linie "id|R/P"
+    override fun zapomogiDecyzje(): String {
+        val dec = decyzjeZap()
+        return "ZAD|${idListyZap.ifBlank { "0" }}|${dec.size}" + dec.entries.joinToString("") { "\n${it.key}|${it.value}" }
+    }
+
+    // serwer: POST /zapomogi_odebrane "id,id" - komputer zapisał decyzje
+    override fun zapomogiOdebrane(tekst: String) {
+        val dec = decyzjeZap()
+        for (t in tekst.split(",")) {
+            val id = t.trim().toIntOrNull() ?: continue
+            dec.remove(id)
+        }
+        zapiszDecyzjeZap(dec)
+        runOnUiThread {
+            if (tryb == "ZAPOMOGI") {
+                pokazProtZap()
+                Toast.makeText(this, "✔ Program BHP zapisał decyzje komisji", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     // ------------------------------------------------------------------
