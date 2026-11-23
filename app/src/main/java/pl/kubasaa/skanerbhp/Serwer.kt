@@ -26,6 +26,8 @@ import java.util.concurrent.Executors
  *   POST /chemia          -> spis substancji (produkt x wydział) do zdjęć etykiet - zostaje w telefonie
  *   GET  /chemia_zdjecia  -> zdjęcia etykiet czekające w telefonie, linie "nr|id produktu|kod wydziału|nazwa"
  *   GET  /chemia_zdjecie?nr=N -> plik JPG
+ *   POST /chemia_prosba   -> "id|kod wydziału|nazwa" - okno produktu w Programie BHP prosi o zdjęcie etykiety
+ *                            (telefon od razu pokazuje: aparat / galeria); zdjęcia idą zwykłą drogą /chemia_zdjecia
  *   POST /chemia_odebrane -> "nr,nr,..." komputer zapisał zdjęcia - telefon je kasuje
  *   POST /maszyny         -> źródła z pomiarów + kartoteka maszyn (łączenie na hali)
  *   GET  /maszyny_powiazania -> przypisania z telefonu, linie "id źródła|P/R/X|id maszyn"
@@ -66,6 +68,7 @@ class Serwer(private val obsluga: Obsluga) {
         fun stan(): String
         fun chemiaWyniki(tekst: String)
         fun zdjeciaSprawy(tekst: String)
+        fun chemiaProsba(tekst: String): String
         fun komisja(tekst: String)
         fun komisjaOceny(): String
         fun kontrole(tekst: String)
@@ -191,6 +194,7 @@ class Serwer(private val obsluga: Obsluga) {
                 sciezka == "/sms" && metoda == "POST" -> obsluga.sms(cialo)
                 sciezka == "/chemia" && metoda == "POST" -> { obsluga.chemia(cialo); "OK" }
                 sciezka == "/chemia_zdjecia" -> obsluga.chemiaZdjecia()
+                sciezka == "/chemia_prosba" && metoda == "POST" -> obsluga.chemiaProsba(cialo)
                 sciezka == "/chemia_odebrane" && metoda == "POST" -> { obsluga.chemiaOdebrane(cialo); "OK" }
                 sciezka == "/maszyny" && metoda == "POST" -> { obsluga.maszyny(cialo); "OK" }
                 sciezka == "/maszyny_powiazania" -> obsluga.maszynyPowiazania()

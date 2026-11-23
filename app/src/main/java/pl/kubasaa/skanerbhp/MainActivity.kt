@@ -217,6 +217,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private var wydzialyChem: List<String> = emptyList()
     private var wszystkieWydzChem: List<Pair<String, String>> = emptyList()     // kod, nazwa - wszystkie wydziały z komputera
     private var celZdjecia: Triple<Int, String, String>? = null      // id produktu (0 = spoza listy, -1 do przypisania, -2 rozpoznaj), kod wydziału, nazwa
+    private var zProsbyChem = false                                   // zdjęcie na prośbę okna produktu w Programie BHP
+    private var oknoProsbyChem: AlertDialog? = null
     private var typZdjeciaChem = "E"                                  // E etykieta, K karta charakterystyki (papier na wydziale)
     private var plikAparatu: File? = null
     private val aparatChem = registerForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
@@ -228,11 +230,11 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             rozpoznajZdjecieChem(f, cel.second)
         } else if (ok && f != null && f.exists() && cel != null) {
             zapiszZdjecieChem(cel, { f.inputStream() }, typZdjeciaChem) { f.delete() }
-            if (cel.first == -1) {
+            if (cel.first == -1 || zProsbyChem) {
                 AlertDialog.Builder(this)
-                    .setTitle("Zapisano zdjęcie (wydział ${cel.second})")
+                    .setTitle(if (zProsbyChem) "Zapisano: ${cel.third}" else "Zapisano zdjęcie (wydział ${cel.second})")
                     .setPositiveButton("Następne zdjęcie") { _, _ -> zrobZdjecieChem() }
-                    .setNegativeButton("Koniec", null)
+                    .setNegativeButton("Koniec") { _, _ -> zProsbyChem = false }
                     .show()
             }
         }
@@ -2164,6 +2166,43 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     }
 
     // serwer: POST /chemia_wyniki - linie tekstu, najnowsze na górze (zostaje 60)
+    // serwer: POST /chemia_prosba "id|kod wydziału|nazwa" - Program BHP (okno produktu) prosi o zdjęcie etykiety
+    override fun chemiaProsba(tekst: String): String {
+        val p = tekst.trim().split("|")
+        val id = p.getOrNull(0)?.trim()?.toIntOrNull() ?: return "BLAD|brak id produktu"
+        if (id <= 0) return "BLAD|zły produkt"
+        val kod = polskie(p.getOrElse(1) { "-" }.trim()).ifEmpty { "-" }
+        val nazwa = polskie(p.getOrElse(2) { "" }.trim())
+        runOnUiThread { prosbaZdjeciaChem(id, kod, nazwa) }
+        return "OK"
+    }
+
+    private fun prosbaZdjeciaChem(id: Int, kod: String, nazwa: String) {
+        if (trybSerii != 0) {
+            Toast.makeText(this, "Najpierw zakończ serię zdjęć - potem kliknij jeszcze raz w komputerze", Toast.LENGTH_LONG).show()
+            return
+        }
+        try { oknoProsbyChem?.dismiss() } catch (e: Exception) {}
+        ton?.startTone(ToneGenerator.TONE_PROP_BEEP2, 400)
+        val opcje = arrayOf("\uD83D\uDCF7  Zrób zdjęcie etykiety", "\uD83D\uDDBC  Wybierz z galerii (kilka)")
+        oknoProsbyChem = AlertDialog.Builder(this)
+            .setTitle("Program BHP prosi o zdjęcie:\n$nazwa")
+            .setItems(opcje) { _, k ->
+                celZdjecia = Triple(id, kod, nazwa)
+                typZdjeciaChem = "E"
+                if (k == 0) {
+                    zProsbyChem = true
+                    zrobZdjecieChem()
+                } else {
+                    zProsbyChem = false
+                    galeriaChem.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                }
+            }
+            .setNegativeButton("Anuluj", null)
+            .create()
+        oknoProsbyChem?.show()
+    }
+
     override fun chemiaWyniki(tekst: String) {
         val godz = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date())
         val nowe = tekst.replace("\r", "").split("\n").filter { it.isNotBlank() }.map { "$godz  " + polskie(it.trim()) }
