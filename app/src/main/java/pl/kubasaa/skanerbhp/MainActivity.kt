@@ -1,6 +1,8 @@
 package pl.kubasaa.skanerbhp
 
 import android.Manifest
+import android.content.ContentValues
+import android.provider.CalendarContract
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -1196,6 +1198,98 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     }
 
     // POST /sms: "numer\ntreść" (polskie litery jako ~a ...).  Numer 9 cyfr -> +48.
+    // ------------------------------------------------------------------
+    //  KALENDARZ: POST /kalendarz - posiedzenie komisji z Programu BHP do kalendarza Google (z przypomnieniami)
+    // ------------------------------------------------------------------
+    private val prosbaKalendarz = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { w ->
+        if (w.values.all { it }) Toast.makeText(this, "Kalendarz: zgoda jest - następne posiedzenia dopiszą się same", Toast.LENGTH_LONG).show()
+    }
+
+    private fun kalendarzGoogle(): Long {
+        val proj = arrayOf(CalendarContract.Calendars._ID, CalendarContract.Calendars.ACCOUNT_TYPE,
+            CalendarContract.Calendars.IS_PRIMARY, CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL, CalendarContract.Calendars.VISIBLE)
+        var najlepszy = -1L
+        var punkty = -1
+        contentResolver.query(CalendarContract.Calendars.CONTENT_URI, proj, null, null, null)?.use { c ->
+            while (c.moveToNext()) {
+                val dostep = c.getInt(3)
+                if (dostep < CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR) continue
+                var p = 0
+                if (c.getString(1) == "com.google") p += 4
+                if (c.getInt(2) == 1) p += 2
+                if (c.getInt(4) == 1) p += 1
+                if (p > punkty) { punkty = p; najlepszy = c.getLong(0) }
+            }
+        }
+        return najlepszy
+    }
+
+    // serwer: POST /kalendarz
+    override fun kalendarz(tekst: String): String {
+        val l = tekst.replace("\r", "").split("\n")
+        if (l.size < 3 || l[0].trim() != "KAL1") return "BLAD|zły format"
+        val tytul = polskie(l[1].trim())
+        val start = try {
+            java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).parse(l[2].trim())?.time
+        } catch (e: Exception) { null } ?: return "BLAD|zła data: ${l[2]}"
+        val minut = l.getOrNull(3)?.trim()?.toIntOrNull() ?: 60
+        val koniec = start + minut * 60_000L
+        val miejsce = polskie(l.getOrElse(4) { "" }.trim())
+        val opis = polskie(l.getOrElse(5) { "" }.trim()).replace(" / ", "\n")
+        val przyp = l.getOrElse(6) { "1440,60" }.split(",").mapNotNull { it.trim().toIntOrNull() }
+        val zgoda = ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_CALENDAR) == PackageManager.PERMISSION_GRANTED &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CALENDAR) == PackageManager.PERMISSION_GRANTED
+        if (!zgoda) {
+            // bez zgody: prośba o zgodę + otwarty kalendarz z gotowym wydarzeniem (wystarczy Zapisz)
+            runOnUiThread {
+                try {
+                    prosbaKalendarz.launch(arrayOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR))
+                    val i = Intent(Intent.ACTION_INSERT).setData(CalendarContract.Events.CONTENT_URI)
+                        .putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, start)
+                        .putExtra(CalendarContract.EXTRA_EVENT_END_TIME, koniec)
+                        .putExtra(CalendarContract.Events.TITLE, tytul)
+                        .putExtra(CalendarContract.Events.EVENT_LOCATION, miejsce)
+                        .putExtra(CalendarContract.Events.DESCRIPTION, opis)
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    startActivity(i)
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Nie udało się otworzyć kalendarza", Toast.LENGTH_LONG).show()
+                }
+            }
+            return "OTWARTO"
+        }
+        return try {
+            val idKal = kalendarzGoogle()
+            if (idKal < 0) return "BLAD|w telefonie nie ma kalendarza Google do zapisu"
+            // to samo posiedzenie już jest
+            contentResolver.query(CalendarContract.Events.CONTENT_URI, arrayOf(CalendarContract.Events._ID),
+                "${CalendarContract.Events.CALENDAR_ID} = ? AND ${CalendarContract.Events.DTSTART} = ? AND ${CalendarContract.Events.TITLE} = ? AND ${CalendarContract.Events.DELETED} = 0",
+                arrayOf(idKal.toString(), start.toString(), tytul), null)?.use { c -> if (c.count > 0) return "JEST" }
+            val w = ContentValues()
+            w.put(CalendarContract.Events.CALENDAR_ID, idKal)
+            w.put(CalendarContract.Events.TITLE, tytul)
+            w.put(CalendarContract.Events.DTSTART, start)
+            w.put(CalendarContract.Events.DTEND, koniec)
+            w.put(CalendarContract.Events.EVENT_LOCATION, miejsce)
+            w.put(CalendarContract.Events.DESCRIPTION, opis)
+            w.put(CalendarContract.Events.EVENT_TIMEZONE, java.util.TimeZone.getDefault().id)
+            w.put(CalendarContract.Events.HAS_ALARM, if (przyp.isEmpty()) 0 else 1)
+            val uri = contentResolver.insert(CalendarContract.Events.CONTENT_URI, w) ?: return "BLAD|kalendarz nie przyjął wydarzenia"
+            val idW = uri.lastPathSegment?.toLongOrNull() ?: return "BLAD|brak id wydarzenia"
+            for (p in przyp) {
+                val r = ContentValues()
+                r.put(CalendarContract.Reminders.EVENT_ID, idW)
+                r.put(CalendarContract.Reminders.MINUTES, p)
+                r.put(CalendarContract.Reminders.METHOD, CalendarContract.Reminders.METHOD_ALERT)
+                contentResolver.insert(CalendarContract.Reminders.CONTENT_URI, r)
+            }
+            runOnUiThread { Toast.makeText(this, "\uD83D\uDCC5 Dodano do kalendarza: $tytul", Toast.LENGTH_LONG).show() }
+            "OK"
+        } catch (e: Exception) {
+            "BLAD|" + (e.message ?: "nie udało się zapisać w kalendarzu")
+        }
+    }
+
     override fun sms(tekst: String): String {
         val linie = tekst.replace("\r", "").split("\n", limit = 2)
         if (linie.size < 2) return "BLAD|brak numeru albo treści"

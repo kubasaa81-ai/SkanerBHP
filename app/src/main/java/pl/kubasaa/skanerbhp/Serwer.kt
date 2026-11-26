@@ -32,6 +32,8 @@ import java.util.concurrent.Executors
  *   POST /maszyny         -> źródła z pomiarów + kartoteka maszyn (łączenie na hali)
  *   GET  /maszyny_powiazania -> przypisania z telefonu, linie "id źródła|P/R/X|id maszyn"
  *   POST /maszyny_odebrane -> "id,id" komputer zapisał połączenia
+ *   POST /kalendarz       -> "KAL1\ntytuł\nRRRR-MM-DD GG:MM\nminut\nmiejsce\nopis\nprzypomnienia (min, np. 1440,60)" - wydarzenie
+ *                            w kalendarzu Google telefonu; odpowiedź: OK | JEST (już było) | OTWARTO (bez zgody: otwarty kalendarz) | BLAD|opis
  *   POST /sms             -> "numer\ntreść" - telefon wysyła SMS (np. hasło do pliku z danymi osobowymi);
  *                            odpowiedź: OK | OTWARTO (bez zgody na SMS: otwarte Wiadomości z gotowym tekstem) | BLAD|opis
  *   POST /komisja         -> "KOM|id|tytuł" + "P|nr|etykieta|status" + "T|treść" - punkty do oceny (Komisja BHP)
@@ -69,6 +71,7 @@ class Serwer(private val obsluga: Obsluga) {
         fun chemiaWyniki(tekst: String)
         fun zdjeciaSprawy(tekst: String)
         fun chemiaProsba(tekst: String): String
+        fun kalendarz(tekst: String): String
         fun komisja(tekst: String)
         fun komisjaOceny(): String
         fun kontrole(tekst: String)
@@ -192,6 +195,7 @@ class Serwer(private val obsluga: Obsluga) {
                 sciezka == "/odebrane" && metoda == "POST" -> { obsluga.odebrane(cialo); "OK" }
                 sciezka == "/zdjecia_sprawa" && metoda == "POST" -> { obsluga.zdjeciaSprawa(cialo); "OK" }
                 sciezka == "/sms" && metoda == "POST" -> obsluga.sms(cialo)
+                sciezka == "/kalendarz" && metoda == "POST" -> obsluga.kalendarz(cialo)
                 sciezka == "/chemia" && metoda == "POST" -> { obsluga.chemia(cialo); "OK" }
                 sciezka == "/chemia_zdjecia" -> obsluga.chemiaZdjecia()
                 sciezka == "/chemia_prosba" && metoda == "POST" -> obsluga.chemiaProsba(cialo)
