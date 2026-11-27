@@ -202,7 +202,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
     private val folderZdj: File by lazy { File(filesDir, "zdjecia").apply { mkdirs() } }
 
     // etykiety chemii: lista z komputera (chemia/lista.txt), zdjęcia chemia/ch_<nr>.jpg + ch_<nr>.txt ("id|kod|nazwa")
-    private class ProdChem(val id: Int, val kod: String, val doUst: Boolean, val nazwa: String, val producent: String, val miejsce: String, val stan: String = "")
+    private class ProdChem(val id: Int, val kod: String, val doUst: Boolean, val nazwa: String, val producent: String, val miejsce: String, val stan: String = "", val maZdj: Boolean = true)
     private var listaChem: List<ProdChem> = emptyList()
     @Volatile private var dataListyChem = ""
     @Volatile private var wersjaListyChem = ""
@@ -236,7 +236,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
                 AlertDialog.Builder(this)
                     .setTitle(if (zProsbyChem) "Zapisano: ${cel.third}" else "Zapisano zdjęcie (wydział ${cel.second})")
                     .setPositiveButton("Następne zdjęcie") { _, _ -> zrobZdjecieChem() }
-                    .setNegativeButton("Koniec") { _, _ -> zProsbyChem = false }
+                    .setNegativeButton("Koniec") { _, _ -> zProsbyChem = false; pokazListeChem(); if (tryb == "CHEMIA") ustawWydzialyChem() }
                     .show()
             }
         }
@@ -1435,9 +1435,12 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         tKomputerChemMenu = tekst("", 14f, szary)
         tKomputerChemMenu.setPadding(0, dp(10), 0, dp(4))
         ekranChemMenu.addView(tKomputerChemMenu)
-        ekranChemMenu.addView(przycisk("Substancje do ustalenia\n(zdjęcie etykiety)", pomaranczowy, 20f) { pokazChemie(0) }, lpWysoki(14))
-        ekranChemMenu.addView(przycisk("Substancje bez kart charakterystyki\n(jest karta - zrób zdjęcie)", Color.rgb(198, 40, 40), 20f) { pokazChemie(1) }, lpWysoki(12))
-        ekranChemMenu.addView(przycisk("Zdjęcie substancji\n(zdjęcia po kolei, na końcu wydział)", fiolet, 20f) { pokazChemie(2) }, lpWysoki(12))
+        ekranChemMenu.addView(przycisk("🔎  Nowa substancja / sprawdź w spisie\n(zdjęcia etykiety - telefon sam szuka w całym spisie)", fiolet, 20f) { startSeriiSubstancji() }, lpWysoki(14))
+        ekranChemMenu.addView(przycisk("📋  Braki na wydziale\n(brak karty / zdjęcia etykiety / klasyfikacji)", Color.rgb(198, 40, 40), 20f) { pokazChemie(1) }, lpWysoki(12))
+        val opisMenu = tekst("• Nowa substancja: wydział → zdjęcia etykiety → Zakończ. Jeśli produkt jest w spisie - pokaże gdzie i dopisze wydział; jeśli nie ma - doda go do bazy ze zdjęciami.\n" +
+            "• Braki: lista produktów wydziału, którym czegoś brakuje - dotknij i zrób zdjęcie etykiety albo karty.", 14f, szary)
+        opisMenu.setPadding(0, dp(14), 0, 0)
+        ekranChemMenu.addView(opisMenu)
     }
 
     private fun pokazChemiaMenu() {
@@ -1451,7 +1454,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         zatrzymajKamere()
         trybChem = t
         filtrChem = if (t == 1) 1 else 0
-        tTytulChem.text = when (t) { 0 -> "  Do ustalenia"; 1 -> "  Bez kart"; else -> "  Zdjęcie substancji" }
+        tTytulChem.text = when (t) { 0 -> "  Do ustalenia"; 1 -> "  Braki na wydziale"; else -> "  Zdjęcie substancji" }
         val lista = t != 2
         przewChem.visibility = if (lista) View.VISIBLE else View.GONE
         wWydzChem.visibility = if (lista) View.VISIBLE else View.GONE
@@ -1481,7 +1484,7 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             if (p.size < 4) continue
             val id = p[0].trim().toIntOrNull() ?: continue
             nowa.add(ProdChem(id, polskie(p[1].trim()), p[2].trim() == "1", polskie(p[3].trim()),
-                polskie(p.getOrElse(4) { "" }.trim()), polskie(p.getOrElse(5) { "" }.trim()), polskie(p.getOrElse(6) { "" }.trim())))
+                polskie(p.getOrElse(4) { "" }.trim()), polskie(p.getOrElse(5) { "" }.trim()), polskie(p.getOrElse(6) { "" }.trim()), p.getOrElse(7) { "1" }.trim() != "0"))
         }
         listaChem = nowa
         wszystkieWydzChem = wydz
@@ -1505,8 +1508,8 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         wydzialyChem = listaChem.map { it.kod }.filter { it != "-" && it.isNotBlank() }.distinct().sorted()
         val opisy = wydzialyChem.map { k ->
             val n = listaChem.count { it.kod == k && it.doUst && liczbaZdjecChem(it.id, k) == 0 }
-            val b = listaChem.count { it.kod == k && brakKarty(it) }
-            k + (if (n > 0) "  ($n do ustalenia" + (if (b > 0) ", $b bez karty)" else ")") else if (b > 0) "  ($b bez karty)" else "")
+            val b = listaChem.count { it.kod == k && brakiChem(it) }
+            k + if (trybChem == 1) (if (b > 0) "  ($b braków)" else "  \u2714") else if (n > 0) "  ($n do ustalenia)" else ""
         }
         spWydzChem.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, opisy)
         val i = if (stary != null) opisy.indexOfFirst { it.substringBefore(" ") == stary.substringBefore(" ") } else -1
@@ -1553,19 +1556,19 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             tStanChem.setTextColor(if (czeka > 0) pomaranczowy else szary)
             return
         }
-        bWszystkieChem.text = when (filtrChem) { 0 -> "Pokaż: do ustalenia"; 1 -> "Pokaż: brak karty"; else -> "Pokaż: wszystkie" }
+        bWszystkieChem.text = when (filtrChem) { 0 -> "Pokaż: do ustalenia"; 1 -> "Pokaż: braki"; else -> "Pokaż: wszystkie" }
         val kod = wydzialChem()
         val wysl = wyslaneChem()
-        val lista = listaChem.filter { it.kod == kod && when (filtrChem) { 0 -> it.doUst; 1 -> brakKarty(it); else -> true } }
-            .sortedWith(compareBy({ !it.doUst }, { it.nazwa.lowercase() }))
+        val lista = listaChem.filter { it.kod == kod && when (filtrChem) { 0 -> it.doUst; 1 -> brakiChem(it); else -> true } }
+            .sortedWith(compareBy({ !brakKarty(it) }, { it.maZdj }, { it.nazwa.lowercase() }))
         val czeka = zdjeciaChem().size
         val wydz = zdjeciaChem().count { val o = opisZdjeciaChem(it.first); o.getOrNull(0) == "-1" && o.getOrNull(1) == kod }
         tStanChem.text = (if (wydz > 0) "Zdjęcia wydziału do przypisania: $wydz\n" else "") + when {
             listaChem.isEmpty() -> "Spis przyjdzie sam, gdy na komputerze będzie otwarty Program BHP"
             lista.isEmpty() && filtrChem == 0 -> "Na tym wydziale nie ma produktów do ustalenia"
-            lista.isEmpty() && filtrChem == 1 -> "Na tym wydziale wszystkie karty są w porządku"
+            lista.isEmpty() && filtrChem == 1 -> "Na tym wydziale niczego nie brakuje ✔"
             lista.isEmpty() -> "Na tym wydziale nie ma produktów w spisie"
-            filtrChem == 1 -> "Brak / nieaktualna karta - dotknij produktu i zrób zdjęcie karty (strony po kolei)"
+            filtrChem == 1 -> "Braków: ${lista.size}.  Dotknij produktu - zdjęcie etykiety albo karty"
             else -> "Dotknij produktu = zdjęcie etykiety"
         } + if (czeka > 0) "   |   zdjęć czeka na komputer: $czeka" else ""
         tStanChem.setTextColor(if (czeka > 0) pomaranczowy else szary)
@@ -1581,46 +1584,63 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
             tlo.setStroke(dp(2), when {
                 n > 0 -> zielony
                 bylo -> niebieski
-                p.doUst || brakKarty(p) -> pomaranczowy
+                brakiChem(p) -> pomaranczowy
                 else -> Color.rgb(207, 216, 220)
             })
             ramka.background = tlo
             ramka.addView(tekst(p.nazwa, 16f, Color.rgb(38, 50, 56), true))
-            val opis = listOf(p.producent, p.miejsce, if (brakKarty(p)) "karta: " + p.stan.lowercase() else "").filter { it.isNotBlank() }.joinToString("  |  ")
+            val opis = listOf(p.producent, p.miejsce).filter { it.isNotBlank() }.joinToString("  |  ")
             if (opis.isNotBlank()) ramka.addView(tekst(opis, 13f, szary))
+            val braki = listOfNotNull(
+                if (brakKarty(p)) "📄 karta: " + p.stan.lowercase() else null,
+                if (!p.maZdj) "📷 brak zdjęcia etykiety" else null,
+                if (p.doUst) "❓ klasyfikacja do ustalenia" else null)
             val stan = when {
                 n > 0 -> "📷 zdjęć: $n - czekają na komputer"
                 bylo -> "✔ zdjęcie wysłane do komputera"
-                p.doUst -> "DO USTALENIA - zrób zdjęcie etykiety (piktogramy, hasło, zwroty H)"
-                brakKarty(p) -> "BEZ KARTY w BHP - jeśli karta jest na wydziale, zrób jej zdjęcie"
-                else -> "klasyfikacja ustalona"
+                braki.isNotEmpty() -> "BRAKUJE:  " + braki.joinToString("   ")
+                else -> "wszystko jest"
             }
-            ramka.addView(tekst(stan, 13f, if (n > 0) zielony else if (bylo) niebieski else if (p.doUst || brakKarty(p)) pomaranczowy else szary, true))
-            ramka.setOnClickListener {
-                if (trybChem == 1 && n == 0) startSeriiKarty(Triple(p.id, p.kod, p.nazwa)) else menuProduktuChem(p.id, p.kod, p.nazwa)
-            }
+            ramka.addView(tekst(stan, 13f, if (n > 0) zielony else if (bylo) niebieski else if (braki.isNotEmpty()) pomaranczowy else szary, true))
+            ramka.setOnClickListener { menuProduktuChem(p.id, p.kod, p.nazwa) }
             val lpR = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             lpR.topMargin = dp(6)
             listaChemWidok.addView(ramka, lpR)
         }
     }
 
+    // czego brakuje produktowi na wydziale: karta / zdjęcie etykiety / klasyfikacja
+    private fun brakiChem(p: ProdChem): Boolean = p.doUst || brakKarty(p) || !p.maZdj
+
+    // wydziały, na których produkt jest w spisie
+    private fun wydzialyProduktuChem(id: Int): List<String> =
+        listaChem.filter { it.id == id && it.kod != "-" && it.kod.isNotBlank() }.map { it.kod }.distinct().sorted()
+
     private fun menuProduktuChem(id: Int, kod: String, nazwa: String) {
         celZdjecia = Triple(id, kod, nazwa)
         val n = liczbaZdjecChem(id, kod)
-        val opcje = if (trybChem == 1) mutableListOf("Zdjęcie karty charakterystyki (strony po kolei)")
-            else mutableListOf("Zrób zdjęcie etykiety", "Zdjęcie karty charakterystyki (strony po kolei)", "Wybierz z galerii")
+        val p = listaChem.firstOrNull { it.id == id && it.kod == kod }
+        val zdjEt = "📷  Zdjęcia etykiety (po kolei)"
+        val zdjKa = "📄  Zdjęcia karty charakterystyki (strony po kolei)"
+        val gal = "🖼  Etykieta z galerii"
+        val opcje = mutableListOf<String>()
+        if (p != null && brakKarty(p) && p.maZdj && !p.doUst) { opcje.add(zdjKa); opcje.add(zdjEt) } else { opcje.add(zdjEt); opcje.add(zdjKa) }
+        opcje.add(gal)
         if (n > 0) {
             opcje.add("Podgląd zdjęć ($n)")
             opcje.add("Usuń zdjęcia tego produktu ($n)")
         }
+        val tyt = nazwa + if (p != null) {
+            val b = listOfNotNull(if (brakKarty(p)) "karta" else null, if (!p.maZdj) "zdjęcie etykiety" else null, if (p.doUst) "klasyfikacja" else null)
+            if (b.isNotEmpty()) "\nBrakuje: " + b.joinToString(", ") else ""
+        } else ""
         AlertDialog.Builder(this)
-            .setTitle(nazwa)
+            .setTitle(tyt)
             .setItems(opcje.toTypedArray()) { _, k ->
                 when (opcje[k]) {
-                    "Zrób zdjęcie etykiety" -> { typZdjeciaChem = "E"; zrobZdjecieChem() }
-                    "Zdjęcie karty charakterystyki (strony po kolei)" -> startSeriiKarty(Triple(id, kod, nazwa))
-                    "Wybierz z galerii" -> { typZdjeciaChem = "E"; galeriaChem.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+                    zdjEt -> { typZdjeciaChem = "E"; zProsbyChem = true; zrobZdjecieChem() }
+                    zdjKa -> startSeriiKarty(Triple(id, kod, nazwa))
+                    gal -> { typZdjeciaChem = "E"; galeriaChem.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
                     else -> if (opcje[k].startsWith("Podgląd")) podgladZdjecChem(id, kod) else {
                         zdjeciaChem().filter { val o = opisZdjeciaChem(it.first); o.getOrNull(0) == id.toString() && o.getOrNull(1) == kod }
                             .forEach { usunZdjecieChem(it.first) }
@@ -2149,10 +2169,38 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         val odczyt = if (tekst.isNotBlank()) odczytEtykiety(tekst) else ""
         val pewny = kand.isNotEmpty() && kand[0].third >= 1.0 && (kand.size < 2 || kand[1].third < 1.0)
         if (pewny) {
-            zapiszSerieProduktu(Triple(kand[0].first, kod, kand[0].second), odczyt)
+            wynikSprawdzeniaChem(Triple(kand[0].first, kod, kand[0].second), kod, tekst, nazwa, odczyt, kand)
             return
         }
         wyborProduktuSerii(kod, tekst, nazwa, odczyt, kand, false)
+    }
+
+    // produkt rozpoznany na pewno: jest na tym wydziale / jest na innym (dopisz) - z miniaturą
+    private fun wynikSprawdzeniaChem(cel: Triple<Int, String, String>, kod: String, tekst: String, nazwa: String, odczyt: String,
+                                    kand: List<Triple<Int, String, Double>>) {
+        if (kod == "-") { zapiszSerieProduktu(cel, odczyt); return }
+        val gdzie = wydzialyProduktuChem(cel.first)
+        val p = listaChem.firstOrNull { it.id == cel.first }
+        val maZdj = listaChem.any { it.id == cel.first && it.maZdj }
+        val iv = ImageView(this)
+        iv.adjustViewBounds = true
+        iv.maxHeight = dp(170)
+        try { iv.setImageBitmap(wczytajObraz({ seriaChem.first().plik.inputStream() }, 600)) } catch (e: Exception) {}
+        val inny = Triple("❓  To inny produkt...", Color.rgb(96, 125, 139)) { wyborProduktuSerii(kod, tekst, nazwa, odczyt, kand, false) }
+        val usun = Triple("✖  Nie zapisuj (usuń zdjęcia)", Color.rgb(120, 144, 156)) { zakonczSerie() }
+        val stanKarty = if (p != null && brakKarty(p)) "\nKarta: " + p.stan.lowercase() + " - możesz od razu zrobić zdjęcie karty (Braki na wydziale)." else ""
+        if (gdzie.contains(kod)) {
+            okno("✔  Jest już w spisie na $kod", cel.third + (if (gdzie.size > 1) "\nTakże na: " + gdzie.filter { it != kod }.joinToString(", ") else "") +
+                "\n" + (if (maZdj) "Zdjęcie etykiety już jest w bazie." else "W bazie nie ma jeszcze zdjęcia etykiety - zapisz je.") + stanKarty,
+                iv, listOf(
+                    Triple(if (maZdj) "📷  Zapisz zdjęcia mimo to" else "📷  Zapisz zdjęcia przy produkcie", zielony) { zapiszSerieProduktu(cel, odczyt) },
+                    usun, inny))
+        } else {
+            okno("Jest w spisie - na innym wydziale", cel.third + "\nJest na: " + (if (gdzie.isEmpty()) "(bez wydziału)" else gdzie.joinToString(", ")) +
+                "\nNie ma go jeszcze na $kod.", iv, listOf(
+                    Triple("✔  Dopisz do $kod (ze zdjęciami)", zielony) { zapiszSerieProduktu(cel, odczyt) },
+                    inny, usun))
+        }
     }
 
     // wybór produktu (substancja albo karta) - nowoczesne okno z miniaturą
@@ -2169,17 +2217,23 @@ class MainActivity : AppCompatActivity(), Serwer.Obsluga {
         iv.maxHeight = dp(180)
         try { iv.setImageBitmap(wczytajObraz({ plik.inputStream() }, 600)) } catch (e: Exception) {}
         val przyc = mutableListOf<Triple<String, Int, () -> Unit>>()
+        val nowyP = Triple("✎  " + (if (kand.isEmpty() && !karta) "Dodaj jako NOWĄ substancję" else "Nowy produkt") + if (nazwa.isNotBlank()) ": " + nazwa.take(30) else "",
+            Color.rgb(106, 27, 154)) { nowyProduktChem(plik, kod, nazwa, odczyt) }
+        if (kand.isEmpty()) przyc.add(nowyP)
         for (k in kand) {
-            val jest = listaChem.any { it.id == k.first && it.kod == kod }
-            przyc.add(Triple((if (jest || kod == "-") "✔  " else "+  ") + k.second.take(40) + if (!jest && kod != "-") "  (dopisz do $kod)" else "",
+            val gdzie = wydzialyProduktuChem(k.first)
+            val jest = gdzie.contains(kod)
+            przyc.add(Triple((if (jest || kod == "-") "✔  " else "+  ") + k.second.take(36) +
+                (if (gdzie.isNotEmpty()) "\n(jest na: " + gdzie.joinToString(", ") + (if (!jest && kod != "-") " - dopisz $kod)" else ")") else ""),
                 Color.rgb(21, 101, 192)) { zapisz(Triple(k.first, kod, k.second)) })
         }
         przyc.add(Triple("🔎  Wybierz z całego spisu", Color.rgb(0, 121, 107)) { wybierzZeSpisuChem(plik, kod, odczyt) })
-        przyc.add(Triple("✎  Nowy produkt" + if (nazwa.isNotBlank()) ": " + nazwa.take(30) else "", Color.rgb(106, 27, 154)) { nowyProduktChem(plik, kod, nazwa, odczyt) })
+        if (kand.isNotEmpty()) przyc.add(nowyP)
         if (!karta) przyc.add(Triple("⏳  Nie wiem - przypiszę na komputerze", pomaranczowy) { zapisz(Triple(-1, kod, nazwa)) })
         przyc.add(Triple("✖  Usuń zdjęcia", Color.rgb(120, 144, 156)) { zakonczSerie() })
         val tyt = when {
             tekst.isBlank() -> "Nie odczytano napisu"
+            kand.isEmpty() && !karta -> "Nie ma w spisie - nowa substancja"
             kand.isEmpty() -> "Nie ma w spisie"
             else -> "Który to produkt?"
         }
